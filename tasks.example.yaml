@@ -1,0 +1,14 @@
+# Example task list. `success_criteria` entries are shell commands run in the
+# generated repo; a task passes when they all exit 0 (or the model emits
+# <lou-done/>). `status` is written back as the job runs (resume on crash).
+#
+# Run it with the default (key-free) mock backend:
+#   python -m lou_op.cli run tasks.example.yaml
+tasks:
+  - name: "Calculator add()"
+    description: "Implement add(a, b) in calc.py with a passing pytest test."
+    success_criteria:
+      - "python -m pytest -q"
+    lint: false
+    max_iterations: 3
+    status: pending
