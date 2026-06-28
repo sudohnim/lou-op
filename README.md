@@ -1,6 +1,7 @@
 # lou-op
+<img width="172" height="400" alt="image" src="https://github.com/user-attachments/assets/26d67ab9-8367-45ca-ab15-bf8f21e732e0" />
 
-Ralph Loop but shout out to Lou.
+[Ralph Loop](https://ghuntley.com/loop/) implementation asynchronously either locally or remotely.
 
 Async code generation: hand it a task list, it iterates an LLM in a loop —
 read state → generate → validate → **commit every iteration** — until the
