@@ -35,6 +35,7 @@ class Task(BaseModel):
     description: str = ""
     success_criteria: List[str] = Field(default_factory=list)
     lint: bool = False  # run the built-in Python lint validator too
+    judge: bool = False  # add LLM-as-judge quality gate after each iteration
     max_iterations: int = 5
     depends_on: List[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING

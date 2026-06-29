@@ -112,6 +112,7 @@ _GITIGNORE = "\n".join(
         ".pytest_cache/",
         ".mypy_cache/",
         ".venv/",
+        ".serena/",
         ".lou-op/metadata.json",
         "",
     ]

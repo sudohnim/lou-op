@@ -38,9 +38,15 @@ class ClaudeProvider(Provider):
     def build_command(self, prompt: str, work_dir: str) -> List[str]:  # noqa: ARG002
         return [
             self.cli_path,
-            "--allowedTools", self.allowed_tools,
-            "-p", prompt,
-            "--output-format", "stream-json",
+            # Hermetic: load no MCP servers, so the agent doesn't pollute the
+            # generated repo (e.g. serena writing .serena/) and starts faster.
+            "--strict-mcp-config",
+            "--allowedTools",
+            self.allowed_tools,
+            "-p",
+            prompt,
+            "--output-format",
+            "stream-json",
             "--verbose",
         ]
 
