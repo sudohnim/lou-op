@@ -1,4 +1,5 @@
 # lou-op
+<img width="172" height="400" alt="image" src="https://github.com/user-attachments/assets/26d67ab9-8367-45ca-ab15-bf8f21e732e0" />
 
 Async code generation via Ralph loops. Hand it a task list and a backend; it
 iterates an LLM — read state → generate → validate → **commit every iteration**
