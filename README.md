@@ -12,7 +12,7 @@ Named after Lou, Chief Wiggum's lieutenant
 
 | Scenario | Tool |
 |---|---|
-| Interactive debugging, design, exploration | **Claude Code** (this session) |
+| Interactive debugging, design, exploration | **Claude Code** |
 | Single task, Claude CLI, you watch the terminal | **Chief** |
 | Multi-task, async, swap in any model, check back later | **lou-op** |
 
