@@ -27,6 +27,12 @@ from .validators import Validator, build_validators
 from .workspace import GitWorkspace, NullWorkspace, Workspace
 
 
+class DependencyError(Exception):
+    """Raised when task dependencies cannot be satisfied."""
+
+    pass
+
+
 def load_tasks(path: Path) -> List[Task]:
     data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     raw = data.get("tasks", [])
@@ -79,6 +85,74 @@ def next_task(tasks: List[Task]) -> Optional[Task]:
         if task.status not in (TaskStatus.PASSED,):
             return task
     return None
+
+
+def select_next_task(tasks: List[Task]) -> Optional[Task]:
+    """Return first PENDING task whose dependencies are satisfied.
+
+    Raises DependencyError if:
+    - A dependency is FAILED
+    - A dependency name does not exist
+    - A dependency cycle is detected
+
+    Returns None if no task is PENDING.
+    """
+    task_by_name = {t.name: t for t in tasks}
+    pending_tasks = [t for t in tasks if t.status == TaskStatus.PENDING]
+
+    if not pending_tasks:
+        return None
+
+    def has_cycle(task_name: str, visited: set[str], rec_stack: set[str]) -> bool:
+        """Check if task_name is part of a dependency cycle."""
+        if task_name in rec_stack:
+            return True
+        if task_name in visited:
+            return False
+
+        visited.add(task_name)
+        rec_stack.add(task_name)
+
+        task = task_by_name.get(task_name)
+        if task:
+            for dep_name in task.depends_on:
+                if has_cycle(dep_name, visited, rec_stack):
+                    return True
+
+        rec_stack.remove(task_name)
+        return False
+
+    def are_deps_satisfied(task: Task) -> bool:
+        """Check if all dependencies of task are satisfied (PASSED)."""
+        for dep_name in task.depends_on:
+            if dep_name not in task_by_name:
+                raise DependencyError(
+                    f"task '{task.name}' depends on unknown task '{dep_name}'"
+                )
+            dep_task = task_by_name[dep_name]
+            if dep_task.status == TaskStatus.FAILED:
+                raise DependencyError(
+                    f"task '{task.name}' depends on failed task '{dep_name}'"
+                )
+            if dep_task.status != TaskStatus.PASSED:
+                return False
+        return True
+
+    for task in pending_tasks:
+        try:
+            if are_deps_satisfied(task):
+                return task
+        except DependencyError:
+            raise
+
+    for task in pending_tasks:
+        if has_cycle(task.name, set(), set()):
+            raise DependencyError(f"dependency cycle detected involving '{task.name}'")
+
+    raise DependencyError(
+        "pending tasks exist but none can run "
+        "(check for failed dependencies or cycles)"
+    )
 
 
 class JobManager:
@@ -173,7 +247,7 @@ class JobManager:
         tasks = list(spec.tasks)
 
         while True:
-            task = next_task(tasks)
+            task = select_next_task(tasks)
             if task is None:
                 break
             state.current_task = task.name
