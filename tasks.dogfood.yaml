@@ -1,0 +1,89 @@
+tasks:
+- name: audit trail
+  description: |
+    Implement US-101 from PRD.md (## v0.3 section): an append-only JSONL audit
+    trail for the native backend.
+
+    1. Create `lou_op/audit.py` with class `AuditLog`:
+       - `AuditLog(root: Path)` — events go to `<root>/.lou-op/audit.jsonl`
+       - `record(event: str, data: dict) -> None` — appends one JSON line:
+         {"ts": "<ISO-8601 UTC>", "event": event, "data": data}
+       - append-only; mkdir parents on first write
+    2. In `lou_op/backends/native_agent.py`, record `tool_call` (name + args)
+       before executing each tool and `tool_result` (name + first line of the
+       result) after. Create the AuditLog from `ctx.repo_path` inside
+       `run_iteration`.
+
+    The spec is `tests/test_audit.py` — read it first; do not modify it.
+  success_criteria:
+  - python -m pytest tests/test_audit.py tests/test_native_agent.py -q
+  protected_files: ["tests/test_audit.py", "tests/test_native_agent.py"]
+  allowed_paths: ["lou_op/audit.py", "lou_op/backends/native_agent.py"]
+  max_iterations: 6
+
+- name: dependency-aware task selection
+  description: |
+    Implement US-102 from PRD.md (## v0.3 section): make the orchestrator
+    respect Task.depends_on.
+
+    In `lou_op/orchestrator.py`:
+    1. Add `class DependencyError(Exception)`.
+    2. Add `select_next_task(tasks: List[Task]) -> Optional[Task]`:
+       - return the first PENDING task whose depends_on are all PASSED
+       - return None when no task is PENDING
+       - raise DependencyError if pending tasks remain but none is runnable
+         (dep failed, dep name unknown, or dependency cycle)
+    3. Use it in `_execute` to pick each next task instead of iterating the
+       list in order. Existing orchestrator behavior must stay green.
+
+    The spec is `tests/test_depends_on.py` — read it first; do not modify it.
+  success_criteria:
+  - python -m pytest tests/test_depends_on.py tests/test_orchestrator.py -q
+  protected_files: ["tests/test_depends_on.py", "tests/test_orchestrator.py"]
+  allowed_paths: ["lou_op/orchestrator.py"]
+  max_iterations: 6
+
+- name: progress hygiene
+  description: |
+    Implement US-103 from PRD.md (## v0.3 section): curated progress memory.
+
+    1. In `lou_op/progress.py` add `trim_progress(text: str, max_entries: int = 5) -> str`:
+       - if the text starts with a `## Codebase Patterns` section, preserve it
+         verbatim at the top (everything until the first `## Iteration` header)
+       - keep only the last `max_entries` `## Iteration ...` sections
+       - text already within the limit is returned unchanged (modulo
+         leading/trailing whitespace)
+    2. In `lou_op/loop.py`, apply `trim_progress` to the loop-generated
+       progress content before `write_scratchpad`.
+
+    The spec is `tests/test_progress_patterns.py` — read it first; do not modify it.
+  success_criteria:
+  - python -m pytest tests/test_progress_patterns.py tests/test_loop.py -q
+  protected_files: ["tests/test_progress_patterns.py", "tests/test_loop.py"]
+  allowed_paths: ["lou_op/progress.py", "lou_op/loop.py"]
+  max_iterations: 6
+
+- name: model qualification bench
+  description: |
+    Implement US-104 from PRD.md (## v0.3 section): the `lou-op bench` command.
+
+    1. Create `lou_op/bench.py`:
+       - `@dataclass TaskStats`: name, runs, passes, pass_rate, mean_iterations
+       - `@dataclass BenchReport`: task_stats (List[TaskStats])
+       - `run_bench(repo_path, tasks, backend, *, runs=3) -> BenchReport`
+         Each run must start from clean state: snapshot with `git stash -u`
+         or `git reset --hard` + clean untracked files between runs so no
+         artifacts leak across runs (see test_bench_runs_are_isolated).
+         Reuse `run_task` from lou_op.loop for each run; a run passes when
+         the last IterationResult.passed is True; iterations = len(results).
+    2. Add a `bench` subcommand to `lou_op/cli.py`: loads a tasks yaml, runs
+       run_bench, prints one line per task:
+       name / pass_rate / mean_iterations.
+
+    The spec is `tests/test_bench.py` — read it first; do not modify it.
+  success_criteria:
+  - python -m pytest tests/test_bench.py -q
+  protected_files: ["tests/test_bench.py"]
+  allowed_paths: ["lou_op/bench.py", "lou_op/cli.py"]
+  depends_on: []
+  max_iterations: 6

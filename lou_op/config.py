@@ -41,6 +41,7 @@ class Settings:
     # agent-cli backend.
     agent_provider: str = "claude"
     agent_cli_path: str = "claude"
+    agent_model: str = ""  # empty => CLI default; e.g. "haiku" to pin cheapest
 
     # raw-api + native backends (any OpenAI-compatible endpoint).
     model_id: str = "z-ai/glm-4.6"
@@ -65,6 +66,7 @@ class Settings:
         return cls(
             default_backend=_env("LOU_BACKEND", "mock"),
             agent_provider=_env("LOU_AGENT_PROVIDER", "claude"),
+            agent_model=_env("LOU_AGENT_MODEL", ""),
             agent_cli_path=_env("LOU_AGENT_CLI_PATH", "claude"),
             model_id=_env("LOU_MODEL_ID", "z-ai/glm-4.6"),
             openrouter_api_key=_env("OPENROUTER_API_KEY", ""),

@@ -31,24 +31,31 @@ class ClaudeProvider(Provider):
         cli_path: str = "claude",
         *,
         allowed_tools: str = _CLAUDE_ALLOWED_TOOLS,
+        model: str = "",  # empty => CLI's configured default
     ) -> None:
         self.cli_path = cli_path
         self.allowed_tools = allowed_tools
+        self.model = model
 
     def build_command(self, prompt: str, work_dir: str) -> List[str]:  # noqa: ARG002
-        return [
+        cmd = [
             self.cli_path,
             # Hermetic: load no MCP servers, so the agent doesn't pollute the
             # generated repo (e.g. serena writing .serena/) and starts faster.
             "--strict-mcp-config",
             "--allowedTools",
             self.allowed_tools,
+        ]
+        if self.model:
+            cmd += ["--model", self.model]
+        cmd += [
             "-p",
             prompt,
             "--output-format",
             "stream-json",
             "--verbose",
         ]
+        return cmd
 
 
 class CodexProvider(Provider):
