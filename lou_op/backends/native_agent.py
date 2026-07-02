@@ -21,6 +21,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 import httpx
 
+from ..audit import AuditLog
 from ..models import IterationContext, IterationOutput
 from ..protocol import DONE_SENTINEL, has_done_sentinel
 from .base import Backend
@@ -233,6 +234,7 @@ class NativeAgentBackend(Backend):
 
     def run_iteration(self, ctx: IterationContext) -> IterationOutput:
         emit = ctx.on_line or (lambda _: None)
+        log = AuditLog(ctx.repo_path)
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": ctx.prompt},
@@ -269,7 +271,9 @@ class NativeAgentBackend(Backend):
                 except json.JSONDecodeError:
                     args = {}
                 emit(f"[native] tool: {name}({_preview_args(args)})")
+                log.record("tool_call", {"name": name, **args})
                 result = execute_tool(ctx.repo_path, name, args)
+                log.record("tool_result", {"name": name, "result": result.splitlines()[0]})
                 transcript.append(f"{name}: {result.splitlines()[0][:120]}")
                 messages.append(
                     {
