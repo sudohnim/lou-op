@@ -50,6 +50,7 @@ class JobSpec(BaseModel):
     backend: str = "mock"
     workspace_type: str = "git"
     git_remote: Optional[str] = None
+    project_path: Optional[str] = None  # work in this dir directly (no sub-repo)
     max_iterations_per_task: int = 5
     timeout_seconds: int = 7200
 
@@ -98,6 +99,7 @@ class IterationOutput:
     done: bool
     summary: str
     log: str
+    scratchpad: str = ""
 
 
 @dataclass

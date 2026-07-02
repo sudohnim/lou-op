@@ -1,8 +1,7 @@
-"""LLM-as-judge validator: semantic quality gate beyond test commands.
+"""LLM-as-judge: integrity check that fires before each iteration (except the first).
 
-Command validators (pytest, lint) verify syntax and structure.
-The judge asks a language model: "was the goal *actually* accomplished?"
-It catches cases where the agent games the tests without solving the problem.
+Asks: "Is the codebase a proper reflection of what the progress log and git history
+document?" Mismatch → immediate JudgeAbort requiring manual intervention.
 """
 
 from __future__ import annotations
@@ -11,37 +10,43 @@ from pathlib import Path
 from typing import Sequence
 
 from .backends.extractor import LLMClient
-from .models import Task, ValidationResult
-from .validators import Validator
+from .git_ops import log as git_log_fn
 
-_JUDGE_PROMPT = """\
-You are a senior code reviewer acting as a quality judge for an automated code-generation loop.
+_CONSISTENCY_PROMPT = """\
+You are a code integrity judge for an automated coding loop.
 
-Task: {name}
-Description:
-{description}
+Verify the codebase matches what the progress log and git history document.
+Flag anything suspicious: gamed tests, fabricated progress, undocumented changes,
+code that contradicts what was claimed to be implemented.
 
-Stated success criteria:
-{criteria}
+## Progress Log (what the agent claims it did)
+{progress}
 
-Current codebase:
+## Git History (actual commits made)
+{git_log}
+
+## Current Codebase
 {code}
 
 ---
-Did the agent *actually* accomplish the goal described above — not just technically pass the \
-test commands, but solve the real problem with reasonable quality?
+Is the codebase a proper reflection of what is documented?
 
-Reply with exactly one of:
-PASS
-FAIL: <one concise sentence explaining what is missing or wrong>
+Check:
+- Code actually implements what progress log claims
+- Tests are genuine (not hardcoded to pass, not trivially bypassed)
+- Git history shows real incremental work
+- No undocumented changes or deletions
 
-Do not explain further. Do not add any other text."""
+If consistent: respond exactly CONTINUE
+If wrong: respond STOP:<one sentence reason>
 
-_CODE_BUDGET = 12_000  # chars — enough for small projects, cheap on tokens
+Only those two options. No other text.\
+"""
+
+_CODE_BUDGET = 12_000
 
 
 def _snapshot(repo_path: Path, extensions: Sequence[str] = (".py",)) -> str:
-    """Collect source files up to _CODE_BUDGET chars, skipping venv/cache dirs."""
     skip = {".venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".git", ".lou-op"}
     parts: list[str] = []
     total = 0
@@ -57,34 +62,46 @@ def _snapshot(repo_path: Path, extensions: Sequence[str] = (".py",)) -> str:
             if total >= _CODE_BUDGET:
                 parts.append("### (truncated — budget reached)")
                 return "\n\n".join(parts)
-    return "\n\n".join(parts) or "(no source files found)"
+    return "\n\n".join(parts) or "(no source files)"
 
 
-class JudgeLLMValidator(Validator):
-    """Calls an LLM to assess whether the task goal was genuinely met."""
+class JudgeAbort(Exception):
+    """Raised when the consistency judge flags an integrity issue."""
 
-    name = "judge-llm"
 
-    def __init__(self, client: LLMClient, task: Task) -> None:
+class ConsistencyJudge:
+    """Fires at the start of every iteration after the first.
+
+    Reviews progress.md + git log + codebase. Inconsistency → JudgeAbort.
+    LLM errors are silently ignored (non-blocking).
+    """
+
+    def __init__(self, client: LLMClient) -> None:
         self.client = client
-        self.task = task
 
-    def run(self, repo_path: Path) -> ValidationResult:
+    def check(self, repo_path: Path) -> None:
+        """Raises JudgeAbort if codebase is inconsistent with documented history."""
+        progress_path = repo_path / ".lou-op" / "progress.md"
+        progress = (
+            progress_path.read_text(errors="replace")
+            if progress_path.exists()
+            else "(no progress log yet)"
+        )
+        git_log = git_log_fn(repo_path, count=20)
+        log_str = "\n".join(git_log) or "(no commits yet)"
         code = _snapshot(repo_path)
-        criteria = "\n".join(f"- {c}" for c in self.task.success_criteria) or "(none listed)"
-        prompt = _JUDGE_PROMPT.format(
-            name=self.task.name,
-            description=self.task.description or "(no description)",
-            criteria=criteria,
+
+        prompt = _CONSISTENCY_PROMPT.format(
+            progress=progress,
+            git_log=log_str,
             code=code,
         )
         try:
             response = self.client.generate(prompt).strip()
-        except Exception as exc:  # noqa: BLE001 — judge unavailable → don't block loop
-            return ValidationResult(
-                name=self.name,
-                passed=True,
-                output=f"judge unavailable: {exc}",
-            )
-        passed = response.upper().startswith("PASS")
-        return ValidationResult(name=self.name, passed=passed, output=response)
+        except Exception:  # noqa: BLE001 — unavailable → don't block
+            return
+
+        if response.upper().startswith("CONTINUE"):
+            return
+        reason = response[5:].strip() if response.upper().startswith("STOP") else response
+        raise JudgeAbort(f"judge: {reason}")
