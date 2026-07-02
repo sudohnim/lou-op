@@ -25,8 +25,10 @@ def test_keeps_patterns_and_last_n_entries() -> None:
     out = trim_progress(text, max_entries=3)
     assert "## Codebase Patterns" in out
     assert "validators gate done" in out
-    assert "## Iteration 10" in out and "## Iteration 8" in out
-    assert "## Iteration 7" not in out and "## Iteration 1" not in out
+    # em-dash-delimited: "## Iteration 1 —" cannot substring-match inside
+    # "## Iteration 10 —" (spec-author bug caught by the first dogfood run)
+    assert "## Iteration 10 —" in out and "## Iteration 8 —" in out
+    assert "## Iteration 7 —" not in out and "## Iteration 1 —" not in out
 
 
 def test_no_patterns_section_still_trims() -> None:

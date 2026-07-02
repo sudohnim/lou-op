@@ -68,23 +68,7 @@ def trim_progress(text: str, max_entries: int = 5) -> str:
     else:
         result = patterns_section if patterns_section else ""
 
-    result_stripped = result.strip()
-
-    # Remove substrings for discarded iteration numbers to avoid matching issues.
-    # For example, prevent "## Iteration 1" appearing as substring in "## Iteration 10".
-    all_iteration_numbers = iteration_numbers
-    discarded_numbers = set(all_iteration_numbers[:-max_entries]) if max_entries < len(all_iteration_numbers) else set()
-
-    if discarded_numbers:
-        # Remove "## Iteration N " (with specific trailing pattern) for discarded N
-        # Sort by descending number to handle multi-digit cases correctly
-        for num in sorted(discarded_numbers, reverse=True):
-            # Match "## Iteration N" followed by space, dash, or line end, but NOT followed by a digit
-            # This avoids matching "## Iteration 1" in "## Iteration 10"
-            pattern = rf'## Iteration {num}(?=[ —]|$)'
-            result_stripped = re.sub(pattern, '', result_stripped)
-
-    return result_stripped.strip()
+    return result.strip()
 
 
 def write_scratchpad(repo_path: Path, content: str) -> None:
