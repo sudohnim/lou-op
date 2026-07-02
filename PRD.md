@@ -299,3 +299,44 @@ decomposition is deferred to a later version.)
 - Borrows agent-CLI orchestration, the progress file, watchdog/retry, and
   living-doc task state from Chief (https://github.com/minicodemonkey/chief);
   borrows the lint stack from the `eidolon` project.
+
+
+---
+
+## v0.3 — Dogfood backlog (built by lou-op itself)
+
+Spec/impl split: the seeded tests in `tests/` are the spec (protected); the
+implementing model only writes the files listed per story. Run with
+`lou-op run tasks.dogfood.yaml` (agent-cli backend, model pinned via
+`LOU_AGENT_MODEL`).
+
+### US-101: Audit trail
+**Spec:** `tests/test_audit.py` · **Impl:** `lou_op/audit.py`, `lou_op/backends/native_agent.py`
+`AuditLog(root)` appends one JSON line per event to `.lou-op/audit.jsonl`:
+`{"ts": <iso8601>, "event": <str>, "data": <dict>}`. Native backend records
+`tool_call` before and `tool_result` after every tool execution. Append-only;
+create parent dirs on first write. This is the data-custody artifact: the
+reviewable record of everything the model read, wrote, and ran.
+
+### US-102: Dependency-aware task selection
+**Spec:** `tests/test_depends_on.py` · **Impl:** `lou_op/orchestrator.py`
+`select_next_task(tasks) -> Task | None` — first PENDING task whose
+`depends_on` are all PASSED. Raise `DependencyError` (new exception) when a
+pending task depends on a failed/unknown task or a cycle makes progress
+impossible. Return None when nothing is pending. Wire into `_execute` in
+place of first-unfinished order; keep existing orchestrator tests green.
+
+### US-103: Progress hygiene (Chief's "Codebase Patterns")
+**Spec:** `tests/test_progress_patterns.py` · **Impl:** `lou_op/progress.py`, `lou_op/loop.py`
+`trim_progress(text, max_entries=5) -> str` — preserve an optional leading
+`## Codebase Patterns` section verbatim, keep only the last N
+`## Iteration ...` entries. Loop applies it before each progress.md write so
+fresh-context iterations read curated memory, not an unbounded log.
+
+### US-104: Model qualification bench
+**Spec:** `tests/test_bench.py` · **Impl:** `lou_op/bench.py`, `lou_op/cli.py`
+`run_bench(repo_path, tasks, backend, runs=N) -> BenchReport` — run each task
+N times, each from clean state (git stash/reset between runs), aggregate
+`TaskStats(name, runs, passes, pass_rate, mean_iterations)`. Add a
+`lou-op bench` subcommand printing one table row per task. Answers "is this
+model good enough for this repo" before you trust it with a real job.

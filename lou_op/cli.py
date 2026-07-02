@@ -6,6 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
+from .bench import run_bench
+from .backends.registry import get_backend
 from .config import Settings
 from .models import JobSpec, Task, TaskStatus
 from .orchestrator import JobManager, load_tasks, write_tasks
@@ -160,6 +162,26 @@ def _run(args: argparse.Namespace) -> int:
     return 0
 
 
+def _bench(args: argparse.Namespace) -> int:
+    tasks_path = Path(args.tasks)
+    if not tasks_path.exists():
+        print(f"tasks file not found: {tasks_path}", file=sys.stderr)
+        return 2
+
+    tasks = load_tasks(tasks_path)
+    settings = Settings.from_env()
+
+    project_path = tasks_path.parent.resolve()
+    backend = get_backend(args.backend or settings.default_backend, settings)
+
+    report = run_bench(project_path, tasks, backend, runs=args.runs)
+
+    for stats in report.task_stats:
+        print(f"{stats.name} / {stats.pass_rate} / {stats.mean_iterations}")
+
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lou-op")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -179,6 +201,12 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--remote", default=None, help="git remote URL to push to")
     run.add_argument("--jobs-dir", dest="jobs_dir", default="")
     run.set_defaults(func=_run)
+
+    bench = sub.add_parser("bench", help="benchmark tasks: measure pass rate and iteration count")
+    bench.add_argument("tasks", help="path to tasks.yaml")
+    bench.add_argument("--backend", help="mock | agent-cli | raw-api")
+    bench.add_argument("--runs", type=int, default=3, help="number of runs per task (default: 3)")
+    bench.set_defaults(func=_bench)
 
     args = parser.parse_args(argv)
     return int(args.func(args))

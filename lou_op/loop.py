@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
@@ -17,7 +18,7 @@ from .models import (
     Task,
     ValidationResult,
 )
-from .progress import read_progress, write_scratchpad
+from .progress import read_progress, trim_progress, write_scratchpad
 from .prompts import build_prompt
 from .state import render_state
 from .validators import Validator, build_validators
@@ -30,6 +31,78 @@ def _status_tag(passed: bool, done: bool) -> str:
     if passed:
         return "✓"
     return "done" if done else "tests failing"
+
+
+def _snapshot_protected(repo_path: Path, patterns: List[str]) -> dict[str, str]:
+    """Capture contents of files matching ``patterns`` at task start."""
+    snapshot: dict[str, str] = {}
+    for pattern in patterns:
+        for path in sorted(repo_path.glob(pattern)):
+            if path.is_file():
+                rel = str(path.relative_to(repo_path))
+                snapshot[rel] = path.read_text(encoding="utf-8")
+    return snapshot
+
+
+def _restore_protected(
+    repo_path: Path, snapshot: dict[str, str], emit: Callable[[str], None]
+) -> None:
+    """Rewrite protected files if the model changed or deleted them."""
+    for rel, content in snapshot.items():
+        target = repo_path / rel
+        if not target.exists() or target.read_text(encoding="utf-8") != content:
+            emit(f"[guard] restoring protected file: {rel}")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(content, encoding="utf-8")
+
+
+def _in_scope(rel: str, patterns: List[str]) -> bool:
+    for pattern in patterns:
+        if fnmatch.fnmatch(rel, pattern):
+            return True
+        # "dir/**" — fnmatch has no recursive glob, treat as prefix match
+        if pattern.endswith("/**") and rel.startswith(pattern[:-3].rstrip("/") + "/"):
+            return True
+    return False
+
+
+def _changed_paths(repo_path: Path) -> List[tuple[str, bool]]:
+    """``(relative_path, is_untracked)`` for every dirty path in the repo."""
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=repo_path,
+        capture_output=True,
+        text=True,
+    )
+    changed: List[tuple[str, bool]] = []
+    for line in result.stdout.splitlines():
+        status, rel = line[:2], line[3:]
+        if " -> " in rel:  # rename: act on the new path
+            rel = rel.split(" -> ", 1)[1]
+        changed.append((rel.strip('"'), status == "??"))
+    return changed
+
+
+def _revert_out_of_scope(
+    repo_path: Path, allowed: List[str], emit: Callable[[str], None]
+) -> None:
+    """Undo model changes outside ``allowed`` globs (``.lou-op/`` is exempt)."""
+    if not allowed:
+        return
+    for rel, untracked in _changed_paths(repo_path):
+        if rel.startswith(".lou-op/") or _in_scope(rel, allowed):
+            continue
+        emit(f"[guard] reverting out-of-scope change: {rel}")
+        if untracked:
+            target = repo_path / rel
+            if target.is_file():
+                target.unlink()
+        else:
+            subprocess.run(
+                ["git", "checkout", "--", rel],
+                cwd=repo_path,
+                capture_output=True,
+            )
 
 
 def _has_uncommitted_changes(repo_path: Path) -> bool:
@@ -63,12 +136,33 @@ def run_task(
     last_wrote_files: bool = True  # assume first iteration will be productive
     last_claimed_done: bool = False  # whether the model signalled done last iteration
     work_path = workspace.path if workspace is not None else repo_path
+    protected = _snapshot_protected(work_path, task.protected_files)
+
+    # Anti-gaming pre-flight: a healthy spec is red before any work. If the
+    # validators already pass, either the task is done (resume) or the spec is
+    # vacuous — either way, don't burn model iterations on it.
+    if checks:
+        preflight = [check.run(work_path) for check in checks]
+        if all(v.passed for v in preflight):
+            emit(
+                "[guard] validators pass before any work — task already done"
+                " or spec is vacuous; skipping model"
+            )
+            return [
+                IterationResult(
+                    iteration=0,
+                    passed=True,
+                    done=True,
+                    commit="",
+                    validations=preflight,
+                )
+            ]
 
     for iteration in range(1, task.max_iterations + 1):
         # B — no-op short circuit
         # If nothing was written AND tests still failing AND model didn't claim done:
         # true no-op — stop immediately, no point continuing
-        # If nothing was written AND model claimed done: model is wrong — warn and continue
+        # If nothing written AND model claimed done: model is wrong — warn, continue
         if iteration > 1 and not last_wrote_files:
             if not last_claimed_done:
                 emit(
@@ -110,23 +204,33 @@ def run_task(
         )
 
         output = retry_with_backoff(lambda: backend.run_iteration(ctx))
-
-        # detect whether backend actually wrote any files (before commit)
-        last_wrote_files = _has_uncommitted_changes(work_path)
         last_claimed_done = output.done
+
+        # guards run before anything is measured or validated:
+        # out-of-scope changes are reverted, tampered spec files restored
+        _revert_out_of_scope(work_path, task.allowed_paths, emit)
+        _restore_protected(work_path, protected, emit)
+
+        # "wrote files" now means work that *survived* the guards
+        last_wrote_files = _has_uncommitted_changes(work_path)
 
         last_validation = [check.run(work_path) for check in checks]
         passed = all(v.passed for v in last_validation)
         done = passed  # model's done signal is advisory; validators are the gate
 
-        # Write progress.md — prefer model's scratchpad, fall back to loop-generated entry
+        # Write progress.md — prefer model's scratchpad, else loop-generated entry
         if output.scratchpad:
             write_scratchpad(work_path, output.scratchpad)
         else:
             existing = read_progress(work_path)
-            val_summary = "; ".join(
-                f"{'PASS' if v.passed else 'FAIL'}: {v.name}" for v in last_validation
-            ) if last_validation else "no validators"
+            val_summary = (
+                "; ".join(
+                    f"{'PASS' if v.passed else 'FAIL'}: {v.name}"
+                    for v in last_validation
+                )
+                if last_validation
+                else "no validators"
+            )
             val_output = "\n".join(
                 f"  {v.output[:300]}" for v in last_validation if not v.passed
             )
@@ -136,7 +240,7 @@ def run_task(
                 f"**Validators:** {val_summary}\n"
                 + (f"**Errors:**\n{val_output}\n" if val_output else "")
             )
-            write_scratchpad(work_path, (existing + entry).strip())
+            write_scratchpad(work_path, trim_progress(existing + entry))
 
         commit_msg = f"{task.name}: iteration {iteration} [{_status_tag(passed, done)}]"
         if workspace is not None:
