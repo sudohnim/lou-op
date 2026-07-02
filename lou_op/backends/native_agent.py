@@ -273,8 +273,10 @@ class NativeAgentBackend(Backend):
                 emit(f"[native] tool: {name}({_preview_args(args)})")
                 log.record("tool_call", {"name": name, **args})
                 result = execute_tool(ctx.repo_path, name, args)
-                log.record("tool_result", {"name": name, "result": result.splitlines()[0]})
-                transcript.append(f"{name}: {result.splitlines()[0][:120]}")
+                # empty result (e.g. read of an empty file) has no lines
+                first_line = result.splitlines()[0] if result else ""
+                log.record("tool_result", {"name": name, "result": first_line})
+                transcript.append(f"{name}: {first_line[:120]}")
                 messages.append(
                     {
                         "role": "tool",
