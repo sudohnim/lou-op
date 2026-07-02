@@ -1,11 +1,11 @@
 # lou-op
 <img width="172" height="400" alt="image" src="https://github.com/user-attachments/assets/26d67ab9-8367-45ca-ab15-bf8f21e732e0" />
 
-Async code generation via Ralph loops. Hand it a task list and a backend; it
-iterates an LLM — read state → generate → validate → **commit every iteration**
-— until the tests pass and the judge says the goal was met. Clean git history,
-one commit per iteration. Named after Lou Wiggum: methodical, persistent, gets
-the job done through iteration.
+Async code generation via Ralph loops. 
+Hand it a task list and a backend; it iterates an LLM — read state → generate → validate → **commit every iteration** — until the tests pass and the judge says the goal was met. Clean git history,
+one commit per iteration. 
+
+Named after Lou, Chief Wiggum's lieutenant
 
 ---
 
