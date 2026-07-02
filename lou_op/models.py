@@ -35,6 +35,7 @@ class Task(BaseModel):
     description: str = ""
     success_criteria: List[str] = Field(default_factory=list)
     lint: bool = False  # run the built-in Python lint validator too
+    judge: bool = False  # add LLM-as-judge quality gate after each iteration
     max_iterations: int = 5
     depends_on: List[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
@@ -49,6 +50,7 @@ class JobSpec(BaseModel):
     backend: str = "mock"
     workspace_type: str = "git"
     git_remote: Optional[str] = None
+    project_path: Optional[str] = None  # work in this dir directly (no sub-repo)
     max_iterations_per_task: int = 5
     timeout_seconds: int = 7200
 
@@ -97,6 +99,7 @@ class IterationOutput:
     done: bool
     summary: str
     log: str
+    scratchpad: str = ""
 
 
 @dataclass

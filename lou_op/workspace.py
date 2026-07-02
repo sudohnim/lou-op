@@ -48,11 +48,23 @@ class Workspace(ABC):
 
 
 class GitWorkspace(Workspace):
-    """Git-backed workspace: clone-or-init, branch, commit each iteration."""
+    """Git-backed workspace: branch and commit each iteration.
 
-    def __init__(self, jobs_dir: Path, *, remote: Optional[str] = None) -> None:
+    If ``project_path`` is supplied the workspace operates in that existing
+    repo directly — no sub-directory, no clone/init.  Otherwise a fresh repo
+    is created under ``jobs_dir / job_id``.
+    """
+
+    def __init__(
+        self,
+        jobs_dir: Path,
+        *,
+        remote: Optional[str] = None,
+        project_path: Optional[Path] = None,
+    ) -> None:
         self._jobs_dir = jobs_dir
         self._remote = remote
+        self._project_path = project_path
         self._path: Optional[Path] = None
         self._branch: str = ""
 
@@ -63,9 +75,12 @@ class GitWorkspace(Workspace):
         return self._path
 
     def setup(self, job_id: str, branch: str) -> None:
-        self._path = self._jobs_dir / job_id
         self._branch = branch
-        ensure_repo(self._path, self._remote)
+        if self._project_path is not None:
+            self._path = self._project_path
+        else:
+            self._path = self._jobs_dir / job_id
+            ensure_repo(self._path, self._remote)
         checkout_branch(self._path, branch)
         seed_gitignore(self._path)
 

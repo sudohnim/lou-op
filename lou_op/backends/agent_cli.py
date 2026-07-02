@@ -16,11 +16,13 @@ from .base import Backend
 from .providers import Provider
 
 
-def _is_done_stream_json(stdout: str) -> bool:
-    """Detect completion from stream-json output.
+def _parse_result(stdout: str) -> tuple[bool, str]:
+    """Return ``(done, summary)`` from stream-json output.
 
-    Claude CLI emits ``{"type":"result","subtype":"success",...}`` when done.
-    Falls back to sentinel detection when no JSON lines are found (e.g. Codex).
+    Claude CLI emits a final ``{"type":"result","subtype":"success",
+    "result":"..."}``; we use its ``result`` text as the (clean) summary
+    rather than the raw JSON tail. Falls back to sentinel detection + a stdout
+    tail when no JSON lines are found (e.g. Codex).
     """
     json_lines = 0
     for raw in stdout.splitlines():
@@ -29,14 +31,17 @@ def _is_done_stream_json(stdout: str) -> bool:
             continue
         try:
             obj = json.loads(raw)
-            json_lines += 1
-            if isinstance(obj, dict) and obj.get("type") == "result":
-                return obj.get("subtype") == "success"
         except json.JSONDecodeError:
-            pass
+            continue
+        json_lines += 1
+        if isinstance(obj, dict) and obj.get("type") == "result":
+            done = obj.get("subtype") == "success"
+            summary = str(obj.get("result") or "").strip()
+            return done, summary
     if json_lines == 0:
-        return has_done_sentinel(stdout)
-    return False
+        tail = "\n".join(stdout.splitlines()[-20:])
+        return has_done_sentinel(stdout), tail
+    return False, ""
 
 
 class AgentCLIBackend(Backend):
@@ -66,6 +71,7 @@ class AgentCLIBackend(Backend):
         )
         if result.timed_out:
             raise TimeoutError(f"agent CLI '{self.provider.name}' watchdog timeout")
-        done = _is_done_stream_json(result.stdout)
-        tail = "\n".join(result.stdout.splitlines()[-20:])
-        return IterationOutput(done=done, summary=tail, log=result.stdout)
+        done, summary = _parse_result(result.stdout)
+        if not summary:
+            summary = "\n".join(result.stdout.splitlines()[-20:])
+        return IterationOutput(done=done, summary=summary, log=result.stdout)

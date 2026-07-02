@@ -112,14 +112,21 @@ _GITIGNORE = "\n".join(
         ".pytest_cache/",
         ".mypy_cache/",
         ".venv/",
+        ".serena/",
+        ".lou-op-jobs/",
         ".lou-op/metadata.json",
         "",
     ]
 )
 
+_GITIGNORE_APPEND = ".lou-op-jobs/\n"
+
 
 def seed_gitignore(repo_path: Path) -> None:
-    """Write a basic .gitignore if one doesn't exist."""
+    """Write a basic .gitignore if one doesn't exist; append .lou-op-jobs/ if missing."""
     path = repo_path / ".gitignore"
     if not path.exists():
         path.write_text(_GITIGNORE, encoding="utf-8")
+    elif ".lou-op-jobs" not in path.read_text(encoding="utf-8"):
+        with path.open("a", encoding="utf-8") as f:
+            f.write(_GITIGNORE_APPEND)

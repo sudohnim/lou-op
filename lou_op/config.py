@@ -11,6 +11,12 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+# Load .env from cwd or nearest parent directory.
+# override=False means real env vars always win over .env values.
+load_dotenv(override=False)
+
 
 def _env(name: str, default: str) -> str:
     value = os.getenv(name)

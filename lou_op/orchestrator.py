@@ -15,11 +15,15 @@ from typing import Dict, List, Optional
 
 import yaml
 
+from .backends.extractor import LLMClient
+from .backends.raw_api import OpenRouterClient
 from .backends.registry import get_backend
 from .config import Settings
 from .git_ops import log
+from .judge import ConsistencyJudge
 from .loop import run_task
 from .models import JobSpec, JobState, JobStatus, Task, TaskStatus
+from .validators import Validator, build_validators
 from .workspace import GitWorkspace, NullWorkspace, Workspace
 
 
@@ -34,10 +38,33 @@ def write_tasks(path: Path, tasks: List[Task]) -> None:
     path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
 
 
+def _make_judge_client(settings: Settings) -> LLMClient | None:
+    if not settings.openrouter_api_key:
+        return None
+    return OpenRouterClient(
+        api_key=settings.openrouter_api_key,
+        model_id=settings.model_id,
+        timeout=settings.inference_timeout_s,
+    )
+
+
+def _make_consistency_judge(task: Task, settings: Settings) -> ConsistencyJudge | None:
+    """Return a ConsistencyJudge if task.judge is enabled, else None."""
+    if not task.judge:
+        return None
+    client = _make_judge_client(settings)
+    if client is None:
+        return None
+    return ConsistencyJudge(client)
+
+
 def _make_workspace(spec: JobSpec, settings: Settings) -> Workspace:
+    project_path = Path(spec.project_path) if spec.project_path else None
     key = spec.workspace_type.strip().lower()
     if key == "git":
-        return GitWorkspace(settings.jobs_dir, remote=spec.git_remote)
+        return GitWorkspace(
+            settings.jobs_dir, remote=spec.git_remote, project_path=project_path
+        )
     if key == "null":
         return NullWorkspace(settings.jobs_dir)
     raise ValueError(f"unknown workspace_type: {spec.workspace_type!r}")
@@ -154,11 +181,15 @@ class JobManager:
             if tasks_path is not None:
                 write_tasks(tasks_path, tasks)
 
+            validators = build_validators(task, self.settings.inference_timeout_s)
+            consistency_judge = _make_consistency_judge(task, self.settings)
             results = run_task(
                 workspace.path,
                 task,
                 backend,
                 workspace=workspace,
+                validators=validators,
+                consistency_judge=consistency_judge,
                 budget=self.settings.context_budget_tokens,
                 timeout=self.settings.inference_timeout_s,
                 on_line=on_line,
