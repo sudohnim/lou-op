@@ -18,7 +18,7 @@ from .models import (
     Task,
     ValidationResult,
 )
-from .progress import read_progress, write_scratchpad
+from .progress import read_progress, trim_progress, write_scratchpad
 from .prompts import build_prompt
 from .state import render_state
 from .validators import Validator, build_validators
@@ -240,7 +240,7 @@ def run_task(
                 f"**Validators:** {val_summary}\n"
                 + (f"**Errors:**\n{val_output}\n" if val_output else "")
             )
-            write_scratchpad(work_path, (existing + entry).strip())
+            write_scratchpad(work_path, trim_progress(existing + entry))
 
         commit_msg = f"{task.name}: iteration {iteration} [{_status_tag(passed, done)}]"
         if workspace is not None:
