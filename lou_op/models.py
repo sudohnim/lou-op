@@ -39,6 +39,8 @@ class Task(BaseModel):
     # Glob patterns (relative to repo root) the model must not change; the loop
     # snapshots matches at task start and restores them before every validation.
     protected_files: List[str] = Field(default_factory=list)
+    # If set, model changes outside these globs are reverted (".lou-op/" exempt).
+    allowed_paths: List[str] = Field(default_factory=list)
     max_iterations: int = 5
     depends_on: List[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING

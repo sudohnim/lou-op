@@ -25,13 +25,19 @@ class _TamperingBackend(Backend):
 
 
 class _SpecIntactValidator:
-    """Passes only if the protected file still holds the original spec."""
+    """Red until impl.py exists; green only if the spec also survived intact.
+
+    Requiring impl.py keeps this red at pre-flight — a green-before-work
+    validator now trips the vacuous-spec guard and skips the model.
+    """
 
     name = "spec-intact"
 
     def run(self, repo_path: Path) -> ValidationResult:
-        content = (repo_path / "tests_spec.py").read_text(encoding="utf-8")
-        return ValidationResult(name=self.name, passed=content == SPEC, output=content)
+        spec_file = repo_path / "tests_spec.py"
+        content = spec_file.read_text(encoding="utf-8") if spec_file.exists() else ""
+        passed = content == SPEC and (repo_path / "impl.py").exists()
+        return ValidationResult(name=self.name, passed=passed, output=content)
 
 
 def test_tampered_protected_file_is_restored_before_validation(repo: Path) -> None:
@@ -66,3 +72,98 @@ def test_deleted_protected_file_is_recreated(repo: Path) -> None:
     task = Task(name="g", protected_files=["tests_spec.py"], max_iterations=1)
     run_task(repo, task, _Deleter(), validators=[_SpecIntactValidator()])
     assert (repo / "tests_spec.py").read_text(encoding="utf-8") == SPEC
+
+
+class _AlwaysPassValidator:
+    name = "always-pass"
+
+    def run(self, repo_path: Path) -> ValidationResult:
+        return ValidationResult(name=self.name, passed=True, output="")
+
+
+class _ExplodingBackend(Backend):
+    """Fails the test if the loop calls the model at all."""
+
+    name = "exploding"
+    include_code = False
+    raw_api = False
+
+    def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+        raise AssertionError("model must not be called when spec is vacuous")
+
+
+def test_vacuous_spec_skips_model(repo: Path) -> None:
+    """Validators green before any work → guard fires, zero model calls."""
+    lines: list[str] = []
+    results = run_task(
+        repo,
+        Task(name="vacuous", max_iterations=3),
+        _ExplodingBackend(),
+        validators=[_AlwaysPassValidator()],
+        on_line=lines.append,
+    )
+    assert len(results) == 1
+    assert results[0].iteration == 0
+    assert results[0].passed is True
+    assert any("vacuous" in line for line in lines)
+
+
+class _OutOfScopeBackend(Backend):
+    """Writes one in-scope file and one out-of-scope file."""
+
+    name = "sprawler"
+    include_code = False
+    raw_api = False
+
+    def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+        (ctx.repo_path / "impl.py").write_text("x = 1\n", encoding="utf-8")
+        (ctx.repo_path / "sneaky.py").write_text("evil\n", encoding="utf-8")
+        return IterationOutput(done=True, summary="Wrote: impl.py", log="")
+
+
+class _ImplExistsValidator:
+    name = "impl-exists"
+
+    def run(self, repo_path: Path) -> ValidationResult:
+        return ValidationResult(
+            name=self.name, passed=(repo_path / "impl.py").exists(), output=""
+        )
+
+
+def test_out_of_scope_changes_reverted(repo: Path) -> None:
+    lines: list[str] = []
+    task = Task(name="scoped", allowed_paths=["impl.py"], max_iterations=1)
+    results = run_task(
+        repo,
+        task,
+        _OutOfScopeBackend(),
+        validators=[_ImplExistsValidator()],
+        on_line=lines.append,
+    )
+    assert (repo / "impl.py").exists()
+    assert not (repo / "sneaky.py").exists()
+    assert any("out-of-scope" in line and "sneaky.py" in line for line in lines)
+    assert results[-1].passed is True
+
+
+def test_out_of_scope_tracked_file_restored(repo: Path) -> None:
+    """A tracked file modified outside scope is reverted to HEAD."""
+    (repo / "README.md").write_text("original\n", encoding="utf-8")
+    import subprocess
+
+    subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "seed"], cwd=repo, capture_output=True)
+
+    class _ReadmeVandal(Backend):
+        name = "vandal"
+        include_code = False
+        raw_api = False
+
+        def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+            (ctx.repo_path / "impl.py").write_text("x = 1\n", encoding="utf-8")
+            (ctx.repo_path / "README.md").write_text("vandalized\n", encoding="utf-8")
+            return IterationOutput(done=True, summary="Wrote: impl.py", log="")
+
+    task = Task(name="scoped", allowed_paths=["impl.py"], max_iterations=1)
+    run_task(repo, task, _ReadmeVandal(), validators=[_ImplExistsValidator()])
+    assert (repo / "README.md").read_text(encoding="utf-8") == "original\n"

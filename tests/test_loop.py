@@ -27,7 +27,9 @@ def test_mock_loop_completes_and_commits(repo: Path):
 
 
 def test_progress_file_written(repo: Path):
-    task = Task(name="Calculator add()", success_criteria=["true"])
+    # criterion must be red before work — a trivially-green one (e.g. "true")
+    # now trips the vacuous-spec guard and skips the model entirely
+    task = Task(name="Calculator add()", success_criteria=["python -m pytest -q"])
     run_task(repo, task, MockBackend(), budget=10_000)
     progress = (repo / ".lou-op" / "progress.md").read_text()
     assert progress.strip()  # scratchpad written (content from backend or fallback)
