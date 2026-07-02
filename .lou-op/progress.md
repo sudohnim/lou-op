@@ -18,3 +18,8 @@ All 14 tests pass.
 ## Iteration 1 — ✓
 **Files:** Success. All 12 tests pass.
 **Validators:** PASS: python -m pytest tests/test_depends_on.py tests/test_orchestrator.py -q
+
+
+## Iteration 1 — ✓
+**Files:** Benchmark implementation complete. Created `lou_op/bench.py` with `TaskStats` and `BenchReport` dataclasses, plus `run_bench()` function that runs each task multiple times from a clean git state, tracks pass rates and iteration counts, and restores the repo after completion. Added `bench` subcommand to CLI that loads tasks, runs benchmarks, and prints results. All 62 tests pass.
+**Validators:** PASS: python -m pytest tests/test_bench.py -q
