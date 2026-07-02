@@ -7,6 +7,7 @@ from .agent_cli import AgentCLIBackend
 from .base import Backend
 from .extractor import SLMExtractor
 from .mock import MockBackend
+from .native_agent import NativeAgentBackend
 from .providers import ClaudeProvider, CodexProvider, Provider
 from .raw_api import OpenRouterClient, RawAPIBackend
 
@@ -46,4 +47,15 @@ def get_backend(name: str, settings: Settings) -> Backend:
             )
             extractor = SLMExtractor(extractor_client)
         return RawAPIBackend(client, extractor)
+    if key == "native":
+        if not settings.openrouter_api_key:
+            raise ValueError("native backend requires OPENROUTER_API_KEY")
+        return NativeAgentBackend(
+            settings.openrouter_base_url,
+            settings.openrouter_api_key,
+            settings.model_id,
+            max_turns=settings.native_max_turns,
+            wall_timeout_s=settings.native_wall_timeout_s,
+            request_timeout_s=settings.inference_timeout_s,
+        )
     raise ValueError(f"unknown backend: {name!r}")

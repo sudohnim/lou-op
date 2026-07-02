@@ -35,18 +35,22 @@ def _env_int(name: str, default: int) -> int:
 class Settings:
     """Process-wide configuration."""
 
-    # Which backend drives iterations: "mock" | "agent-cli" | "raw-api".
+    # Which backend drives iterations: "mock" | "agent-cli" | "raw-api" | "native".
     default_backend: str = "mock"
 
     # agent-cli backend.
     agent_provider: str = "claude"
     agent_cli_path: str = "claude"
 
-    # raw-api backend.
+    # raw-api + native backends (any OpenAI-compatible endpoint).
     model_id: str = "z-ai/glm-4.6"
     openrouter_api_key: str = ""
     openrouter_base_url: str = "https://openrouter.ai/api/v1"
     extractor_model_id: str = ""  # empty => no SLM extractor stage
+
+    # native backend budgets.
+    native_max_turns: int = 40
+    native_wall_timeout_s: int = 1800
 
     # Loop budgets / safeguards.
     context_budget_tokens: int = 100_000
@@ -68,6 +72,8 @@ class Settings:
                 "LOU_OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
             ),
             extractor_model_id=_env("LOU_EXTRACTOR_MODEL_ID", ""),
+            native_max_turns=_env_int("LOU_NATIVE_MAX_TURNS", 40),
+            native_wall_timeout_s=_env_int("LOU_NATIVE_WALL_TIMEOUT", 1800),
             context_budget_tokens=_env_int("LOU_CONTEXT_BUDGET", 100_000),
             inference_timeout_s=_env_int("LOU_INFERENCE_TIMEOUT", 300),
             silence_timeout_s=_env_int("LOU_SILENCE_TIMEOUT", 300),
