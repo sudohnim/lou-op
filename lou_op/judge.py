@@ -103,5 +103,7 @@ class ConsistencyJudge:
 
         if response.upper().startswith("CONTINUE"):
             return
-        reason = response[5:].strip() if response.upper().startswith("STOP") else response
+        reason = (
+            response[5:].strip() if response.upper().startswith("STOP") else response
+        )
         raise JudgeAbort(f"judge: {reason}")

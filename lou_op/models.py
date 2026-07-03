@@ -41,6 +41,9 @@ class Task(BaseModel):
     protected_files: List[str] = Field(default_factory=list)
     # If set, model changes outside these globs are reverted (".lou-op/" exempt).
     allowed_paths: List[str] = Field(default_factory=list)
+    # A task with no criteria, no lint, and no judge is unverifiable; loading
+    # one fails unless this is set (see orchestrator.validate_tasks).
+    allow_no_validators: bool = False
     max_iterations: int = 5
     depends_on: List[str] = Field(default_factory=list)
     status: TaskStatus = TaskStatus.PENDING
@@ -54,6 +57,7 @@ class JobSpec(BaseModel):
     prd: str = ""
     backend: str = "mock"
     workspace_type: str = "git"
+    runtime: str = ""  # "host" | "docker"; empty => Settings.runtime
     git_remote: Optional[str] = None
     project_path: Optional[str] = None  # work in this dir directly (no sub-repo)
     max_iterations_per_task: int = 5

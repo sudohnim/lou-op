@@ -22,6 +22,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from ..audit import AuditLog
+from ..exec import scrubbed_env
 from ..models import IterationContext, IterationOutput
 from ..protocol import DONE_SENTINEL, has_done_sentinel
 from .base import Backend
@@ -117,10 +118,16 @@ _TOOLS: List[Dict[str, Any]] = [
 
 
 def _jail(repo_path: Path, rel: str) -> Path:
-    """Resolve ``rel`` under the repo root; refuse escapes (write_files rule)."""
+    """Resolve ``rel`` under the repo root; refuse escapes (write_files rule).
+
+    ``is_relative_to`` after resolving — a plain prefix check would accept
+    sibling dirs sharing the prefix (``/x/repo-evil`` for root ``/x/repo``).
+    resolve() also follows symlinks (including dangling ones), so a link
+    inside the repo pointing outside resolves outside and is rejected.
+    """
     root = repo_path.resolve()
     target = (root / rel).resolve()
-    if not str(target).startswith(str(root)):
+    if not target.is_relative_to(root):
         raise ValueError(f"path escapes repo: {rel}")
     return target
 
@@ -167,6 +174,7 @@ def execute_tool(repo_path: Path, name: str, args: Dict[str, Any]) -> str:
                 capture_output=True,
                 text=True,
                 timeout=_BASH_TIMEOUT_S,
+                env=scrubbed_env(),  # model-authored command: no secrets
             )
             out = (result.stdout + result.stderr).strip()
             return _truncate(f"exit {result.returncode}\n{out}")
@@ -202,6 +210,7 @@ class NativeAgentBackend(Backend):
         api_key: str,
         model_id: str,
         *,
+        auth_scheme: str = "Bearer",
         max_turns: int = 40,
         wall_timeout_s: int = 1800,
         request_timeout_s: int = 600,
@@ -210,17 +219,22 @@ class NativeAgentBackend(Backend):
         self.base_url = base_url.rstrip("/")
         self.api_key = api_key
         self.model_id = model_id
+        # "Bearer" for OpenRouter/vLLM/Modal, "Api-Key" for Baseten.
+        self.auth_scheme = auth_scheme
         self.max_turns = max_turns
         self.wall_timeout_s = wall_timeout_s
         self.request_timeout_s = request_timeout_s
         self._chat_fn = chat_fn or self._http_chat
+
+    def auth_header(self) -> Dict[str, str]:
+        return {"Authorization": f"{self.auth_scheme} {self.api_key}"}
 
     def _http_chat(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
         response = httpx.post(
             f"{self.base_url}/chat/completions",
-            headers={"Authorization": f"Bearer {self.api_key}"},
+            headers=self.auth_header(),
             json={
                 "model": self.model_id,
                 "messages": messages,

@@ -46,8 +46,17 @@ def run_bench(
     except RuntimeError:
         # No commits yet, create an empty one
         run_command(
-            ["git", "-c", "user.name=bench", "-c", "user.email=bench@lou-op.dev",
-             "commit", "--allow-empty", "-m", "bench: initial state"],
+            [
+                "git",
+                "-c",
+                "user.name=bench",
+                "-c",
+                "user.email=bench@lou-op.dev",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "bench: initial state",
+            ],
             repo_path,
         )
         initial_sha = current_commit(repo_path)

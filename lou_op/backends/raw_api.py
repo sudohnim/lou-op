@@ -77,14 +77,21 @@ class RawAPIBackend(Backend):
         # reject done=True if no files were written this iteration and repo is empty
         if done and not written:
             src_files = [
-                p for p in ctx.repo_path.rglob("*")
-                if p.is_file() and not p.name.startswith(".") and ".lou-op" not in str(p)
+                p
+                for p in ctx.repo_path.rglob("*")
+                if p.is_file()
+                and not p.name.startswith(".")
+                and ".lou-op" not in str(p)
             ]
             if not src_files:
-                emit("[raw-api] done=True but no files exist — forcing another iteration")
+                emit(
+                    "[raw-api] done=True but no files exist — forcing another iteration"
+                )
                 done = False
         emit(f"[raw-api] done={done}")
         scratchpad = parse_scratchpad(text)
         emit(f"[raw-api] scratchpad={'yes' if scratchpad else 'none'}")
         summary = "Wrote: " + ", ".join(written) if written else "No files"
-        return IterationOutput(done=done, summary=summary, log=text, scratchpad=scratchpad)
+        return IterationOutput(
+            done=done, summary=summary, log=text, scratchpad=scratchpad
+        )

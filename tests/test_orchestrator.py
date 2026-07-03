@@ -4,7 +4,7 @@ from pathlib import Path
 
 from lou_op.config import Settings
 from lou_op.models import JobSpec, JobStatus, Task, TaskStatus
-from lou_op.orchestrator import JobManager, load_tasks, next_task, write_tasks
+from lou_op.orchestrator import JobManager, load_tasks, select_next_task, write_tasks
 
 
 def test_next_task_selection():
@@ -13,7 +13,7 @@ def test_next_task_selection():
         Task(name="b", status=TaskStatus.PENDING),
         Task(name="c", status=TaskStatus.PENDING),
     ]
-    assert next_task(tasks).name == "b"
+    assert select_next_task(tasks).name == "b"
 
 
 def test_next_task_prefers_in_progress():
@@ -21,12 +21,12 @@ def test_next_task_prefers_in_progress():
         Task(name="a", status=TaskStatus.PENDING),
         Task(name="b", status=TaskStatus.IN_PROGRESS),
     ]
-    assert next_task(tasks).name == "b"
+    assert select_next_task(tasks).name == "b"
 
 
 def test_next_task_none_when_all_passed():
     tasks = [Task(name="a", status=TaskStatus.PASSED)]
-    assert next_task(tasks) is None
+    assert select_next_task(tasks) is None
 
 
 def test_tasks_roundtrip_writeback(tmp_path: Path):

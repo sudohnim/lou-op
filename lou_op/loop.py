@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fnmatch
+import re
 import subprocess
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
@@ -67,24 +68,79 @@ def _in_scope(rel: str, patterns: List[str]) -> bool:
 
 
 def _changed_paths(repo_path: Path) -> List[tuple[str, bool]]:
-    """``(relative_path, is_untracked)`` for every dirty path in the repo."""
+    """``(relative_path, is_untracked)`` for every dirty path in the repo.
+
+    Uses ``-z`` (NUL-delimited): no C-style quoting of filenames with
+    spaces/unicode, and rename entries carry the original path as a separate
+    NUL-separated field. A rename contributes BOTH sides — the new path (to
+    remove if out of scope) and the original (to restore).
+    """
     result = subprocess.run(
-        ["git", "status", "--porcelain"],
+        ["git", "status", "-z", "--porcelain"],
         cwd=repo_path,
         capture_output=True,
         text=True,
     )
     changed: List[tuple[str, bool]] = []
-    for line in result.stdout.splitlines():
-        status, rel = line[:2], line[3:]
-        if " -> " in rel:  # rename: act on the new path
-            rel = rel.split(" -> ", 1)[1]
-        changed.append((rel.strip('"'), status == "??"))
+    fields = result.stdout.split("\0")
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if not entry:
+            continue
+        status, rel = entry[:2], entry[3:]
+        changed.append((rel, status == "??"))
+        if status[0] in ("R", "C") and i < len(fields):  # rename/copy: orig next
+            changed.append((fields[i], False))
+            i += 1
     return changed
 
 
+def _in_head(repo_path: Path, rel: str) -> bool:
+    result = subprocess.run(
+        ["git", "cat-file", "-e", f"HEAD:{rel}"],
+        cwd=repo_path,
+        capture_output=True,
+    )
+    return result.returncode == 0
+
+
+def _revert_one(repo_path: Path, rel: str, untracked: bool) -> None:
+    """Return one path to its HEAD state (or oblivion, if it isn't in HEAD)."""
+    target = repo_path / rel
+    if untracked:
+        if target.is_file():
+            target.unlink()
+        return
+    if _in_head(repo_path, rel):
+        # unstage + restore work tree from HEAD (covers staged renames' orig)
+        subprocess.run(
+            ["git", "checkout", "HEAD", "--", rel],
+            cwd=repo_path,
+            capture_output=True,
+        )
+    else:
+        # staged but not in HEAD (e.g. the new side of a rename): drop it
+        subprocess.run(
+            ["git", "rm", "-q", "-f", "--cached", rel],
+            cwd=repo_path,
+            capture_output=True,
+        )
+        if target.is_file():
+            target.unlink()
+
+
+def _infer_scope(task: Task) -> List[str]:
+    """strict_scope with no allowed_paths: files named in the task description
+    are the scope. Anything the model touches beyond them gets reverted."""
+    return re.findall(r"[\w./-]*\w\.\w+", task.description)
+
+
 def _revert_out_of_scope(
-    repo_path: Path, allowed: List[str], emit: Callable[[str], None]
+    repo_path: Path,
+    allowed: List[str],
+    emit: Callable[[str], None],
 ) -> None:
     """Undo model changes outside ``allowed`` globs (``.lou-op/`` is exempt)."""
     if not allowed:
@@ -93,16 +149,7 @@ def _revert_out_of_scope(
         if rel.startswith(".lou-op/") or _in_scope(rel, allowed):
             continue
         emit(f"[guard] reverting out-of-scope change: {rel}")
-        if untracked:
-            target = repo_path / rel
-            if target.is_file():
-                target.unlink()
-        else:
-            subprocess.run(
-                ["git", "checkout", "--", rel],
-                cwd=repo_path,
-                capture_output=True,
-            )
+        _revert_one(repo_path, rel, untracked)
 
 
 def _has_uncommitted_changes(repo_path: Path) -> bool:
@@ -126,6 +173,7 @@ def run_task(
     consistency_judge: Optional[ConsistencyJudge] = None,
     budget: int = 100_000,
     timeout: int = 300,
+    strict_scope: bool = False,
     on_line: Optional[Callable[[str], None]] = None,
 ) -> List[IterationResult]:
     """Iterate on ``task`` until it passes, signals done, or hits the cap."""
@@ -137,6 +185,11 @@ def run_task(
     last_claimed_done: bool = False  # whether the model signalled done last iteration
     work_path = workspace.path if workspace is not None else repo_path
     protected = _snapshot_protected(work_path, task.protected_files)
+    # strict mode: no declared scope ≠ unlimited scope — infer it from the
+    # files the task description names
+    scope = task.allowed_paths
+    if strict_scope and not scope:
+        scope = _infer_scope(task)
 
     # Anti-gaming pre-flight: a healthy spec is red before any work. If the
     # validators already pass, either the task is done (resume) or the spec is
@@ -208,7 +261,7 @@ def run_task(
 
         # guards run before anything is measured or validated:
         # out-of-scope changes are reverted, tampered spec files restored
-        _revert_out_of_scope(work_path, task.allowed_paths, emit)
+        _revert_out_of_scope(work_path, scope, emit)
         _restore_protected(work_path, protected, emit)
 
         # "wrote files" now means work that *survived* the guards

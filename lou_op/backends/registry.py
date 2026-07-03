@@ -56,6 +56,7 @@ def get_backend(name: str, settings: Settings) -> Backend:
             settings.openrouter_base_url,
             settings.openrouter_api_key,
             settings.model_id,
+            auth_scheme=settings.auth_scheme,
             max_turns=settings.native_max_turns,
             wall_timeout_s=settings.native_wall_timeout_s,
             request_timeout_s=settings.inference_timeout_s,

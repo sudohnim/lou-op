@@ -37,7 +37,7 @@ def trim_progress(text: str, max_entries: int = 5) -> str:
         return ""
 
     # Split by the iteration header pattern to extract components
-    parts = re.split(r'(\n## Iteration)', text)
+    parts = re.split(r"(\n## Iteration)", text)
 
     # If fewer than 3 parts, there are no iterations
     if len(parts) < 3:
@@ -52,7 +52,7 @@ def trim_progress(text: str, max_entries: int = 5) -> str:
         if i + 1 < len(parts):
             iteration_text = parts[i] + parts[i + 1]
             # Extract iteration number
-            match = re.search(r'## Iteration (\d+)', iteration_text)
+            match = re.search(r"## Iteration (\d+)", iteration_text)
             if match:
                 iteration_numbers.append(int(match.group(1)))
             iterations.append(iteration_text)
@@ -62,9 +62,9 @@ def trim_progress(text: str, max_entries: int = 5) -> str:
 
     # Build the result
     if patterns_section and kept_iterations:
-        result = patterns_section + '\n' + '\n'.join(kept_iterations)
+        result = patterns_section + "\n" + "\n".join(kept_iterations)
     elif kept_iterations:
-        result = '\n'.join(kept_iterations)
+        result = "\n".join(kept_iterations)
     else:
         result = patterns_section if patterns_section else ""
 

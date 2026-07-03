@@ -31,6 +31,13 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Settings:
     """Process-wide configuration."""
@@ -52,6 +59,17 @@ class Settings:
     # native backend budgets.
     native_max_turns: int = 40
     native_wall_timeout_s: int = 1800
+    # "Bearer" (OpenRouter/vLLM/Modal) or "Api-Key" (Baseten).
+    auth_scheme: str = "Bearer"
+    # strict scope: tasks without allowed_paths get scope inferred from their
+    # description instead of unlimited write access.
+    strict_scope: bool = False
+    # execution runtime for model-influenced commands: "host" | "docker".
+    runtime: str = "host"
+    # tasks with satisfied deps run concurrently up to this bound (1 = serial).
+    max_parallel: int = 1
+    # docker runtime: container network on/off (LOU_SANDBOX_NETWORK=off).
+    sandbox_network: bool = True
 
     # Loop budgets / safeguards.
     context_budget_tokens: int = 100_000
@@ -76,6 +94,11 @@ class Settings:
             extractor_model_id=_env("LOU_EXTRACTOR_MODEL_ID", ""),
             native_max_turns=_env_int("LOU_NATIVE_MAX_TURNS", 40),
             native_wall_timeout_s=_env_int("LOU_NATIVE_WALL_TIMEOUT", 1800),
+            auth_scheme=_env("LOU_AUTH_SCHEME", "Bearer"),
+            strict_scope=_env_bool("LOU_STRICT_SCOPE", False),
+            runtime=_env("LOU_RUNTIME", "host"),
+            max_parallel=_env_int("LOU_MAX_PARALLEL", 1),
+            sandbox_network=_env("LOU_SANDBOX_NETWORK", "on").lower() != "off",
             context_budget_tokens=_env_int("LOU_CONTEXT_BUDGET", 100_000),
             inference_timeout_s=_env_int("LOU_INFERENCE_TIMEOUT", 300),
             silence_timeout_s=_env_int("LOU_SILENCE_TIMEOUT", 300),

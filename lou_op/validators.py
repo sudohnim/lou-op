@@ -24,15 +24,19 @@ class Validator(ABC):
 
 
 class CommandValidator(Validator):
-    """Run a single shell command; pass iff it exits 0."""
+    """Run a single shell command; pass iff it exits 0.
 
-    def __init__(self, command: str, timeout: int = 300) -> None:
+    ``shell_fn`` lets a Runtime (e.g. docker sandbox) supply the executor;
+    default is the host run_shell (scrubbed env)."""
+
+    def __init__(self, command: str, timeout: int = 300, shell_fn=None) -> None:
         self.name = command
         self.command = command
         self.timeout = timeout
+        self.shell_fn = shell_fn or run_shell
 
     def run(self, repo_path: Path) -> ValidationResult:
-        result = run_shell(self.command, repo_path, timeout=self.timeout)
+        result = self.shell_fn(self.command, repo_path, timeout=self.timeout)
         output = (result.stdout + result.stderr).strip()
         if result.timed_out:
             output = f"(timed out after {self.timeout}s)\n{output}"
@@ -69,9 +73,9 @@ class PythonLintValidator(Validator):
         return ValidationResult(self.name, passed, "\n".join(outputs))
 
 
-def build_validators(task: Task, timeout: int = 300) -> List[Validator]:
+def build_validators(task: Task, timeout: int = 300, shell_fn=None) -> List[Validator]:
     validators: List[Validator] = [
-        CommandValidator(cmd, timeout) for cmd in task.success_criteria
+        CommandValidator(cmd, timeout, shell_fn) for cmd in task.success_criteria
     ]
     if task.lint:
         validators.append(PythonLintValidator(timeout))

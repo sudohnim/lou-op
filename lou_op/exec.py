@@ -8,6 +8,7 @@ used to supervise long-running agent CLIs.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import threading
 import time
@@ -38,6 +39,23 @@ class CmdResult:
         return self.returncode == 0 and not self.timed_out
 
 
+# Secrets never exposed to model-influenced subprocesses (bash tool, validator
+# shells, agent CLIs). Provider HTTP calls read the key in-process, not env.
+_SECRET_KEYS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}
+_SECRET_PREFIXES = ("LOU_",)
+
+
+def scrubbed_env(passthrough: Sequence[str] = ()) -> dict:
+    """os.environ minus API keys and LOU_* config; ``passthrough`` names win."""
+    keep = set(passthrough)
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key in keep
+        or (key not in _SECRET_KEYS and not key.startswith(_SECRET_PREFIXES))
+    }
+
+
 def run_command(cmd: Sequence[str], cwd: Path, *, timeout: int = 300) -> CmdResult:
     """Run a fixed argv with a hard timeout."""
     try:
@@ -53,8 +71,18 @@ def run_command(cmd: Sequence[str], cwd: Path, *, timeout: int = 300) -> CmdResu
         return CmdResult(-1, _to_str(exc.stdout), _to_str(exc.stderr), True)
 
 
-def run_shell(command: str, cwd: Path, *, timeout: int = 300) -> CmdResult:
-    """Run a shell command string with a hard timeout."""
+def run_shell(
+    command: str,
+    cwd: Path,
+    *,
+    timeout: int = 300,
+    env: Optional[dict] = None,
+) -> CmdResult:
+    """Run a shell command string with a hard timeout.
+
+    Model-influenced by default (validator criteria, agent bash), so the
+    environment is scrubbed of secrets unless an explicit ``env`` is given.
+    """
     try:
         proc = subprocess.run(
             command,
@@ -63,6 +91,7 @@ def run_shell(command: str, cwd: Path, *, timeout: int = 300) -> CmdResult:
             text=True,
             timeout=timeout,
             shell=True,
+            env=env if env is not None else scrubbed_env(),
         )
         return CmdResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as exc:
@@ -76,6 +105,7 @@ def run_streaming(
     total_timeout: int = 600,
     silence_timeout: int = 300,
     on_line: Optional[Callable[[str], None]] = None,
+    env: Optional[dict] = None,
 ) -> CmdResult:
     """Run ``cmd``, streaming stdout, killing it if it hangs.
 
@@ -89,6 +119,7 @@ def run_streaming(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        env=env if env is not None else scrubbed_env(),
     )
     lines: List[str] = []
     start = time.monotonic()

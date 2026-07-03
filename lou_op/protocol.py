@@ -41,7 +41,9 @@ _MD_HEADER_FILE_RE = re.compile(
     re.IGNORECASE,
 )
 # Matches "# filename.py" as first line inside a code block
-_COMMENT_FILE_RE = re.compile(r"^#\s*(?P<path>[\w/.-]+\.(?:py|txt|yaml|yml|json|toml|sh|md))\s*$")
+_COMMENT_FILE_RE = re.compile(
+    r"^#\s*(?P<path>[\w/.-]+\.(?:py|txt|yaml|yml|json|toml|sh|md))\s*$"
+)
 # Extracts raw code blocks (``` ... ```)
 _CODE_BLOCK_RE = re.compile(r"```(?:\w+)?\n(?P<body>.*?)```", re.DOTALL)
 
@@ -118,8 +120,10 @@ def write_files(repo_path: Path, files: List[FileWrite]) -> List[str]:
     written: List[str] = []
     root = repo_path.resolve()
     for file in files:
+        # is_relative_to, not a prefix check — /x/repo-evil must not pass
+        # for root /x/repo. resolve() follows symlinks first.
         target = (root / file.path).resolve()
-        if not str(target).startswith(str(root)):
+        if not target.is_relative_to(root):
             raise ValueError(f"path escapes repo: {file.path}")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(file.content, encoding="utf-8")

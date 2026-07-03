@@ -6,8 +6,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from .bench import run_bench
 from .backends.registry import get_backend
+from .bench import run_bench
 from .config import Settings
 from .models import JobSpec, Task, TaskStatus
 from .orchestrator import JobManager, load_tasks, write_tasks
@@ -65,7 +65,10 @@ def _decompose_task(task: Task, client: object) -> list[Task]:
         raw = data.get("tasks", [])
         return [Task.model_validate(t) for t in raw]
     except Exception as exc:  # noqa: BLE001
-        print(f"  warning: decomposition failed ({exc}), keeping original", file=sys.stderr)
+        print(
+            f"  warning: decomposition failed ({exc}), keeping original",
+            file=sys.stderr,
+        )
         return []
 
 
@@ -129,6 +132,12 @@ def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env()
     if args.jobs_dir:
         settings.jobs_dir = Path(args.jobs_dir)
+    if getattr(args, "strict_scope", False):
+        settings.strict_scope = True
+    if getattr(args, "runtime", ""):
+        settings.runtime = args.runtime
+    if getattr(args, "max_parallel", 0):
+        settings.max_parallel = args.max_parallel
 
     project_path = tasks_path.parent.resolve()
 
@@ -182,6 +191,33 @@ def _bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _ping(args: argparse.Namespace) -> int:
+    from .backends.native_agent import NativeAgentBackend
+    from .ping import ping
+
+    settings = Settings.from_env()
+    if args.model:
+        settings.model_id = args.model
+    if not settings.openrouter_api_key:
+        print("no OPENROUTER_API_KEY set", file=sys.stderr)
+        return 2
+
+    backend = NativeAgentBackend(
+        settings.openrouter_base_url,
+        settings.openrouter_api_key,
+        settings.model_id,
+        auth_scheme=settings.auth_scheme,
+        request_timeout_s=settings.inference_timeout_s,
+    )
+    print(
+        f"pinging {settings.openrouter_base_url} "
+        f"(model={settings.model_id}, auth={settings.auth_scheme}) ..."
+    )
+    result = ping(backend)
+    print(result.render())
+    return 0 if result.ok else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lou-op")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -196,17 +232,45 @@ def main(argv: list[str] | None = None) -> int:
 
     run = sub.add_parser("run", help="run a tasks.yaml to completion")
     run.add_argument("tasks", help="path to tasks.yaml")
-    run.add_argument("--backend", help="mock | agent-cli | raw-api")
+    run.add_argument("--backend", help="mock | agent-cli | native | raw-api")
     run.add_argument("--project-name", dest="project_name", default="")
     run.add_argument("--remote", default=None, help="git remote URL to push to")
     run.add_argument("--jobs-dir", dest="jobs_dir", default="")
+    run.add_argument(
+        "--strict-scope",
+        dest="strict_scope",
+        action="store_true",
+        help="tasks without allowed_paths get scope inferred from description",
+    )
+    run.add_argument(
+        "--runtime",
+        default="",
+        help="host | docker (sandbox model-run commands in a container)",
+    )
+    run.add_argument(
+        "--max-parallel",
+        dest="max_parallel",
+        type=int,
+        default=0,
+        help="run up to N dependency-satisfied tasks concurrently (default 1)",
+    )
     run.set_defaults(func=_run)
 
-    bench = sub.add_parser("bench", help="benchmark tasks: measure pass rate and iteration count")
+    bench = sub.add_parser(
+        "bench", help="benchmark tasks: measure pass rate and iteration count"
+    )
     bench.add_argument("tasks", help="path to tasks.yaml")
     bench.add_argument("--backend", help="mock | agent-cli | raw-api")
-    bench.add_argument("--runs", type=int, default=3, help="number of runs per task (default: 3)")
+    bench.add_argument(
+        "--runs", type=int, default=3, help="number of runs per task (default: 3)"
+    )
     bench.set_defaults(func=_bench)
+
+    ping_p = sub.add_parser(
+        "ping", help="smoke-test the native endpoint: auth + tool-calling round-trip"
+    )
+    ping_p.add_argument("--model", default="", help="override LOU_MODEL_ID")
+    ping_p.set_defaults(func=_ping)
 
     args = parser.parse_args(argv)
     return int(args.func(args))
