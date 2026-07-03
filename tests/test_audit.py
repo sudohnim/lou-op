@@ -61,7 +61,7 @@ class TestNativeAgentAudit:
             ]
         )
         backend = NativeAgentBackend(
-            "http://unused", "key", "m", chat_fn=lambda m, t: next(turns)
+            "http://localhost", "key", "m", chat_fn=lambda m, t: next(turns)
         )
         ctx = IterationContext(
             repo_path=repo, task=Task(name="t"), prompt="p", iteration=1, progress=""

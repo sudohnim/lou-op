@@ -36,26 +36,19 @@ def trim_progress(text: str, max_entries: int = 5) -> str:
     if not text.strip():
         return ""
 
-    # Split by the iteration header pattern to extract components
-    parts = re.split(r"(\n## Iteration)", text)
-
-    # If fewer than 3 parts, there are no iterations
-    if len(parts) < 3:
+    # Line-anchored header matches — a file that STARTS with "## Iteration"
+    # must treat it as an iteration, not as pinned preamble (the old
+    # "\n## Iteration" split silently pinned iteration 1 forever).
+    headers = list(re.finditer(r"^## Iteration\b", text, flags=re.MULTILINE))
+    if not headers:
         return text.strip()
 
-    patterns_section = parts[0].rstrip()
+    patterns_section = text[: headers[0].start()].rstrip()
 
-    # Reconstruct iterations from remaining parts (pairs of delimiter + content)
     iterations = []
-    iteration_numbers = []
-    for i in range(1, len(parts), 2):
-        if i + 1 < len(parts):
-            iteration_text = parts[i] + parts[i + 1]
-            # Extract iteration number
-            match = re.search(r"## Iteration (\d+)", iteration_text)
-            if match:
-                iteration_numbers.append(int(match.group(1)))
-            iterations.append(iteration_text)
+    for idx, match in enumerate(headers):
+        end = headers[idx + 1].start() if idx + 1 < len(headers) else len(text)
+        iterations.append("\n" + text[match.start() : end].rstrip())
 
     # Keep only the last max_entries iterations
     kept_iterations = iterations[-max_entries:] if iterations else []

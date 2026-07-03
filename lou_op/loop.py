@@ -5,6 +5,7 @@ from __future__ import annotations
 import fnmatch
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
 
@@ -174,9 +175,15 @@ def run_task(
     budget: int = 100_000,
     timeout: int = 300,
     strict_scope: bool = False,
+    deadline: Optional[float] = None,
     on_line: Optional[Callable[[str], None]] = None,
 ) -> List[IterationResult]:
-    """Iterate on ``task`` until it passes, signals done, or hits the cap."""
+    """Iterate on ``task`` until it passes, signals done, or hits the cap.
+
+    ``deadline`` is a time.monotonic() timestamp — the job's wall-clock
+    ceiling. Checked at every iteration boundary; breach stops the task
+    cleanly (statuses already persisted by the caller's writeback).
+    """
     emit = on_line or (lambda _: None)
     checks = validators if validators is not None else build_validators(task, timeout)
     results: List[IterationResult] = []
@@ -190,6 +197,18 @@ def run_task(
     scope = task.allowed_paths
     if strict_scope and not scope:
         scope = _infer_scope(task)
+        if not scope:
+            # fail CLOSED: inference found nothing, so under strict mode the
+            # model gets no write scope at all — never unlimited by accident
+            emit(
+                "[guard] strict scope: no allowed_paths and no files named in"
+                f" the description of '{task.name}' — failing closed"
+            )
+            return [
+                IterationResult(
+                    iteration=0, passed=False, done=False, commit="", validations=[]
+                )
+            ]
 
     # Anti-gaming pre-flight: a healthy spec is red before any work. If the
     # validators already pass, either the task is done (resume) or the spec is
@@ -212,6 +231,13 @@ def run_task(
             ]
 
     for iteration in range(1, task.max_iterations + 1):
+        if deadline is not None and time.monotonic() >= deadline:
+            emit(
+                f"[guard] job wall-clock timeout hit before iteration"
+                f" {iteration} of '{task.name}' — stopping"
+            )
+            break
+
         # B — no-op short circuit
         # If nothing was written AND tests still failing AND model didn't claim done:
         # true no-op — stop immediately, no point continuing

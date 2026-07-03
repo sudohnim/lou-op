@@ -6,8 +6,6 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List
 
-import pytest
-
 from lou_op.backends.native_agent import NativeAgentBackend, execute_tool
 from lou_op.models import IterationContext, Task
 
@@ -43,7 +41,7 @@ def _scripted(turns: List[Dict[str, Any]]):
 
 def _backend(turns: List[Dict[str, Any]], **kwargs: Any) -> NativeAgentBackend:
     return NativeAgentBackend(
-        "http://unused", "key", "test-model", chat_fn=_scripted(turns), **kwargs
+        "http://localhost", "key", "test-model", chat_fn=_scripted(turns), **kwargs
     )
 
 
@@ -78,7 +76,7 @@ class TestToolLoop:
                 }
             return {"content": "<lou-done/>", "tool_calls": []}
 
-        backend = NativeAgentBackend("http://u", "k", "m", chat_fn=chat)
+        backend = NativeAgentBackend("http://localhost", "k", "m", chat_fn=chat)
         backend.run_iteration(_ctx(repo))
         # second request must contain the tool result with the file contents
         tool_msgs = [m for m in seen[1] if m["role"] == "tool"]
@@ -154,3 +152,51 @@ class TestExecuteTool:
     def test_errors_are_text_not_exceptions(self, repo: Path) -> None:
         result = execute_tool(repo, "read_file", {"path": "missing.py"})
         assert result.startswith("error:")
+
+
+class TestTokenBudget:
+    """Spec (C1): per-job token cap — abort cleanly, never run unbounded."""
+
+    def test_over_budget_aborts_before_model_call(self, tmp_path):
+        calls = []
+
+        def chat(m, t):
+            calls.append(1)
+            return {"content": "<lou-done/>", "tool_calls": []}
+
+        b = NativeAgentBackend(
+            "http://localhost", "k", "m", max_job_tokens=100, chat_fn=chat
+        )
+        b.tokens_used = 100  # already at cap
+        out = b.run_iteration(_ctx(tmp_path))
+        assert not calls  # no provider call over budget
+        assert not out.done
+        assert "budget" in out.summary
+
+    def test_zero_cap_means_unlimited(self, tmp_path):
+        b = NativeAgentBackend(
+            "http://localhost",
+            "k",
+            "m",
+            max_job_tokens=0,
+            chat_fn=lambda m, t: {"content": "<lou-done/>", "tool_calls": []},
+        )
+        b.tokens_used = 10_000_000
+        out = b.run_iteration(_ctx(tmp_path))
+        assert out.done  # ran normally
+
+    def test_usage_recorded_to_audit(self, tmp_path):
+        import json
+
+        b = NativeAgentBackend(
+            "http://localhost",
+            "k",
+            "m",
+            chat_fn=lambda m, t: {"content": "<lou-done/>", "tool_calls": []},
+        )
+        b.tokens_used = 777
+        b.run_iteration(_ctx(tmp_path))
+        lines = (tmp_path / ".lou-op" / "audit.jsonl").read_text().splitlines()
+        events = [json.loads(ln) for ln in lines]
+        usage = [e for e in events if e["event"] == "usage"]
+        assert usage and usage[-1]["data"]["tokens_total"] == 777

@@ -38,9 +38,12 @@ def test_lint_alone_is_enough(tmp_path: Path) -> None:
     assert load_tasks(f)[0].name == "linty"
 
 
-def test_judge_alone_is_enough(tmp_path: Path) -> None:
+def test_judge_alone_is_rejected(tmp_path: Path) -> None:
+    """The judge is advisory — it never gates, so a judge-only task would
+    auto-pass with zero checks. Reject with a pointed hint."""
     f = _write_tasks(tmp_path, [{"name": "judged", "judge": True}])
-    assert load_tasks(f)[0].name == "judged"
+    with pytest.raises(ValueError, match="advisory"):
+        load_tasks(f)
 
 
 def test_explicit_optout_allows(tmp_path: Path) -> None:

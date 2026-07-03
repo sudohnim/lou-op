@@ -39,20 +39,40 @@ class CmdResult:
         return self.returncode == 0 and not self.timed_out
 
 
-# Secrets never exposed to model-influenced subprocesses (bash tool, validator
-# shells, agent CLIs). Provider HTTP calls read the key in-process, not env.
-_SECRET_KEYS = {"OPENROUTER_API_KEY", "ANTHROPIC_API_KEY"}
-_SECRET_PREFIXES = ("LOU_",)
+# Model-influenced subprocesses (bash tool, validator shells, agent CLIs) get
+# a strict ALLOWLIST, not a denylist — a denylist can't anticipate every
+# secret a host carries (AWS_SECRET_ACCESS_KEY, GH_TOKEN, DATABASE_URL, ...).
+# Provider HTTP calls read the API key in-process, never from this env.
+_ENV_ALLOWED = {
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "SHELL",
+    "TERM",
+    "TMPDIR",
+    "TZ",
+    "LANG",
+    "LANGUAGE",
+    "PWD",
+    "COLUMNS",
+    "LINES",
+    # python tooling needs these to find the right interpreter/site-packages
+    "VIRTUAL_ENV",
+    "PYTHONPATH",
+    "PYTHONHASHSEED",
+    "CI",
+}
+_ENV_ALLOWED_PREFIXES = ("LC_",)
 
 
 def scrubbed_env(passthrough: Sequence[str] = ()) -> dict:
-    """os.environ minus API keys and LOU_* config; ``passthrough`` names win."""
+    """Strict allowlist of os.environ; ``passthrough`` adds names to it."""
     keep = set(passthrough)
     return {
         key: value
         for key, value in os.environ.items()
-        if key in keep
-        or (key not in _SECRET_KEYS and not key.startswith(_SECRET_PREFIXES))
+        if key in keep or key in _ENV_ALLOWED or key.startswith(_ENV_ALLOWED_PREFIXES)
     }
 
 

@@ -128,6 +128,26 @@ def test_strict_scope_infers_from_description(repo: Path) -> None:
     assert not (repo / "sneaky.py").exists()  # unnamed → reverted
 
 
+def test_strict_scope_fails_closed_when_nothing_inferable(repo: Path) -> None:
+    """strict + no allowed_paths + description naming no files → the task
+    FAILS before the backend runs; it must never fall back to unlimited."""
+    ran: list[bool] = []
+    task = Task(
+        name="t",
+        description="Make everything better.",  # no filenames to infer
+        success_criteria=["true"],
+        max_iterations=1,
+    )
+    results = _run(
+        repo,
+        _backend(lambda r: ran.append(True)),
+        task,
+        strict_scope=True,
+    )
+    assert not ran  # backend never invoked
+    assert not results[-1].passed and not results[-1].done
+
+
 def test_default_nonstrict_allows_everything(repo: Path) -> None:
     """Back-compat: empty allowed_paths without strict reverts nothing."""
     task = Task(name="t", success_criteria=["true"], max_iterations=1)

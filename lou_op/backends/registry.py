@@ -60,5 +60,6 @@ def get_backend(name: str, settings: Settings) -> Backend:
             max_turns=settings.native_max_turns,
             wall_timeout_s=settings.native_wall_timeout_s,
             request_timeout_s=settings.inference_timeout_s,
+            max_job_tokens=settings.max_job_tokens,
         )
     raise ValueError(f"unknown backend: {name!r}")

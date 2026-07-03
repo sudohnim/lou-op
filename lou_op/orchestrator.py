@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 import uuid
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
@@ -36,19 +37,22 @@ class DependencyError(Exception):
 
 
 def validate_tasks(tasks: List[Task]) -> None:
-    """Reject unverifiable tasks: no criteria, no lint, no judge — nothing
-    would gate 'passed'. Opt out per-task with ``allow_no_validators``."""
+    """Reject unverifiable tasks at load.
+
+    Only success_criteria and lint GATE the pass/fail loop; the consistency
+    judge is advisory (it never blocks), so judge-only tasks would auto-pass
+    with zero checks. Opt out per-task with ``allow_no_validators``."""
     for task in tasks:
-        if (
-            not task.success_criteria
-            and not task.lint
-            and not task.judge
-            and not task.allow_no_validators
-        ):
+        if not task.success_criteria and not task.lint and not task.allow_no_validators:
+            hint = (
+                " (judge: true is advisory-only and does not gate)"
+                if task.judge
+                else ""
+            )
             raise ValueError(
-                f"task '{task.name}' has no validators (no success_criteria,"
-                " lint: false, judge: false) — its result would be"
-                " meaningless. Add one or set allow_no_validators: true."
+                f"task '{task.name}' has no gating validators — no"
+                f" success_criteria and lint: false{hint}. Its result would"
+                " be meaningless. Add one or set allow_no_validators: true."
             )
 
 
@@ -356,8 +360,12 @@ class JobManager:
             )
 
         state_lock = threading.Lock()
+        # job wall-clock ceiling (JobSpec.timeout_seconds, default 2h)
+        job_deadline = time.monotonic() + max(60, spec.timeout_seconds)
 
         def run_one(task: Task) -> bool:
+            if time.monotonic() >= job_deadline:
+                return False  # over the ceiling: fail fast, don't start work
             with state_lock:
                 state.current_task = task.name
             validators = build_validators(
@@ -376,6 +384,7 @@ class JobManager:
                 budget=self.settings.context_budget_tokens,
                 timeout=self.settings.inference_timeout_s,
                 strict_scope=self.settings.strict_scope,
+                deadline=job_deadline,
                 on_line=on_line,
             )
             passed = bool(results) and results[-1].done
@@ -391,6 +400,7 @@ class JobManager:
                 write_tasks(tasks_path, tasks)
 
         runtime.setup(state.job_id, workspace.path)
+        backend.use_runtime(runtime)  # model bash runs in the same sandbox
         try:
             run_parallel(
                 tasks,

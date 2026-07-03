@@ -26,3 +26,10 @@ class Backend(ABC):
 
     @abstractmethod
     def run_iteration(self, ctx: IterationContext) -> IterationOutput: ...
+
+    def use_runtime(self, runtime) -> None:
+        """Adopt a Runtime for model-influenced execution (bash tool etc.).
+
+        Default is a no-op; backends that execute commands (native)
+        override this so ALL model-authored commands go through the same
+        sandbox the validators use."""

@@ -20,7 +20,12 @@ _DEFAULT_IMAGE = "python:3.12-slim"
 
 
 class Runtime(ABC):
-    """One job's command executor. setup → shell()* → teardown."""
+    """One job's command executor. setup → (sync_in → shell → sync_out)* → teardown.
+
+    File-transfer hooks exist for runtimes without a shared filesystem
+    (cloud sandboxes like Modal). Host and docker share the repo directly
+    (bind mount), so their sync hooks are no-ops.
+    """
 
     @abstractmethod
     def setup(self, job_id: str, repo_path: Path) -> None: ...
@@ -30,6 +35,12 @@ class Runtime(ABC):
 
     @abstractmethod
     def teardown(self) -> None: ...
+
+    def sync_in(self, repo_path: Path) -> None:
+        """Push the local repo state to the execution environment."""
+
+    def sync_out(self, repo_path: Path) -> None:
+        """Pull files the execution environment created back to the repo."""
 
 
 class HostRuntime(Runtime):
@@ -52,7 +63,7 @@ class DockerRuntime(Runtime):
         self,
         image: str = _DEFAULT_IMAGE,
         *,
-        network: bool = True,
+        network: bool = False,
         user: Optional[str] = None,
     ) -> None:
         self.image = image
@@ -140,10 +151,41 @@ class DockerRuntime(Runtime):
         self._job_id = None
 
 
-def get_runtime(name: str, *, network: bool = True) -> Runtime:
+# Third-party runtimes register here (directly, or via the
+# "lou_op.runtimes" entry-point group — e.g. a ModalRuntime package).
+_RUNTIME_REGISTRY: dict = {}
+
+
+def register_runtime(name: str, factory) -> None:
+    """Register a runtime factory: ``factory(network=bool) -> Runtime``."""
+    _RUNTIME_REGISTRY[name.strip().lower()] = factory
+
+
+def _load_entry_point(key: str):
+    from importlib.metadata import entry_points
+
+    for ep in entry_points(group="lou_op.runtimes"):
+        if ep.name == key:
+            return ep.load()
+    return None
+
+
+def get_runtime(name: str, *, network: bool = False) -> Runtime:
     key = (name or "host").strip().lower()
     if key == "host":
         return HostRuntime()
     if key == "docker":
         return DockerRuntime(network=network)
-    raise ValueError(f"unknown runtime: {name!r} (host | docker)")
+    if key == "modal":
+        from .modal_runtime import ModalRuntime  # lazy: needs modal SDK
+
+        return ModalRuntime(network=network)
+    factory = _RUNTIME_REGISTRY.get(key)
+    if factory is None:
+        factory = _load_entry_point(key)
+        if factory is not None:
+            _RUNTIME_REGISTRY[key] = factory
+    if factory is not None:
+        return factory(network=network)
+    known = ["host", "docker", *sorted(_RUNTIME_REGISTRY)]
+    raise ValueError(f"unknown runtime: {name!r} ({' | '.join(known)})")

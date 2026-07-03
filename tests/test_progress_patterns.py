@@ -41,3 +41,13 @@ def test_no_patterns_section_still_trims() -> None:
 def test_under_limit_unchanged() -> None:
     text = PATTERNS + _entry(1)
     assert trim_progress(text, max_entries=5).strip() == text.strip()
+
+
+def test_no_patterns_section_first_iteration_not_pinned():
+    """File starting directly with '## Iteration 1' (no patterns preamble):
+    iteration 1 must be trimmable, not silently pinned as preamble forever."""
+    text = "\n\n".join(f"## Iteration {i} —\ndetail {i}" for i in range(1, 11))
+    out = trim_progress(text, max_entries=3)
+    assert "## Iteration 1 —" not in out
+    assert "## Iteration 10 —" in out
+    assert "## Iteration 8 —" in out

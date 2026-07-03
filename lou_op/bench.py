@@ -6,11 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List
 
+from typing import Optional
+
 from .backends.base import Backend
+from .config import Settings
 from .exec import run_command
 from .git_ops import current_commit, revert_to
 from .loop import run_task
 from .models import Task
+from .runtime import Runtime
+from .validators import build_validators
 
 
 @dataclass
@@ -33,11 +38,16 @@ def run_bench(
     backend: Backend,
     *,
     runs: int = 3,
+    settings: Optional[Settings] = None,
+    runtime: Optional[Runtime] = None,
 ) -> BenchReport:
     """Run each task multiple times to measure pass rate and iteration count.
 
     Each run starts from a clean state (git reset between runs).
+    Bench must measure the SAME configuration a real run uses — pass the
+    job's settings/runtime so strict_scope and sandboxed validators apply.
     """
+    settings = settings or Settings()
     repo_path = Path(repo_path)
 
     # Create an empty initial commit if none exists
@@ -72,15 +82,27 @@ def run_bench(
                 # Reset to clean state before each run
                 revert_to(repo_path, initial_sha)
 
-                # Run the task
-                results = run_task(repo_path, task, backend)
+                # Run the task with the run-equivalent configuration
+                validators = build_validators(
+                    task,
+                    settings.inference_timeout_s,
+                    shell_fn=runtime.shell if runtime is not None else None,
+                )
+                results = run_task(
+                    repo_path,
+                    task,
+                    backend,
+                    validators=validators,
+                    strict_scope=settings.strict_scope,
+                )
 
                 # Check if the run passed (last result)
                 passed = results[-1].passed if results else False
                 run_results.append(passed)
 
-                # Count iterations
-                total_iterations += len(results)
+                # Count REAL iterations — iteration 0 is the vacuous-spec
+                # preflight, not model work
+                total_iterations += len([r for r in results if r.iteration > 0])
 
             # Calculate statistics
             passes = sum(run_results)

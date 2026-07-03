@@ -74,13 +74,14 @@ class TestDockerArgvHardening:
         uid_idx = argv.index("--user") + 1
         assert argv[uid_idx].split(":")[0] not in ("0", "root")
         assert f"{tmp_path.resolve()}:/work" in joined  # repo bind-mounted
-        assert "--network" not in argv  # network on by default
-
-    def test_network_none_flag(self, tmp_path: Path) -> None:
-        rt = DockerRuntime(network=False)
-        argv = rt.create_argv("job1", tmp_path)
+        # default-deny: no egress unless explicitly opted in
         net_idx = argv.index("--network")
         assert argv[net_idx + 1] == "none"
+
+    def test_network_optin_removes_none(self, tmp_path: Path) -> None:
+        rt = DockerRuntime(network=True)
+        argv = rt.create_argv("job1", tmp_path)
+        assert "--network" not in argv
 
     def test_exec_argv_runs_in_work(self) -> None:
         rt = DockerRuntime()

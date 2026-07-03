@@ -26,9 +26,11 @@ class OpenRouterClient:
         base_url: str = "https://openrouter.ai/api/v1",
         timeout: int = 300,
     ) -> None:
+        from ..config import validate_base_url
+
         self.api_key = api_key
         self.model_id = model_id
-        self.base_url = base_url.rstrip("/")
+        self.base_url = validate_base_url(base_url.rstrip("/"))
         self.timeout = timeout
 
     def generate(self, prompt: str) -> str:

@@ -38,6 +38,28 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
+
+
+def validate_base_url(url: str) -> str:
+    """Refuse plain-http inference endpoints unless they're loopback.
+
+    Prompts and code go to this endpoint; over cleartext http to a remote
+    host they're interceptable. Local ollama/vLLM (localhost) is exempt.
+    """
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme == "https":
+        return url
+    if parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS:
+        return url
+    raise ValueError(
+        f"insecure base_url {url!r}: use https:// (plain http is only"
+        " allowed for loopback hosts like localhost)"
+    )
+
+
 @dataclass
 class Settings:
     """Process-wide configuration."""
@@ -68,8 +90,11 @@ class Settings:
     runtime: str = "host"
     # tasks with satisfied deps run concurrently up to this bound (1 = serial).
     max_parallel: int = 1
-    # docker runtime: container network on/off (LOU_SANDBOX_NETWORK=off).
-    sandbox_network: bool = True
+    # hard cap on total provider tokens per job (0 = unlimited).
+    max_job_tokens: int = 0
+    # sandbox egress is DENY by default; opt in with LOU_SANDBOX_NETWORK=on
+    # (only when the task legitimately needs package installs etc.).
+    sandbox_network: bool = False
 
     # Loop budgets / safeguards.
     context_budget_tokens: int = 100_000
@@ -98,7 +123,8 @@ class Settings:
             strict_scope=_env_bool("LOU_STRICT_SCOPE", False),
             runtime=_env("LOU_RUNTIME", "host"),
             max_parallel=_env_int("LOU_MAX_PARALLEL", 1),
-            sandbox_network=_env("LOU_SANDBOX_NETWORK", "on").lower() != "off",
+            max_job_tokens=_env_int("LOU_MAX_JOB_TOKENS", 0),
+            sandbox_network=_env("LOU_SANDBOX_NETWORK", "off").lower() == "on",
             context_budget_tokens=_env_int("LOU_CONTEXT_BUDGET", 100_000),
             inference_timeout_s=_env_int("LOU_INFERENCE_TIMEOUT", 300),
             silence_timeout_s=_env_int("LOU_SILENCE_TIMEOUT", 300),

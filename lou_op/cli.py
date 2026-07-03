@@ -138,6 +138,8 @@ def _run(args: argparse.Namespace) -> int:
         settings.runtime = args.runtime
     if getattr(args, "max_parallel", 0):
         settings.max_parallel = args.max_parallel
+    if getattr(args, "sandbox_network", False):
+        settings.sandbox_network = True
 
     project_path = tasks_path.parent.resolve()
 
@@ -183,7 +185,7 @@ def _bench(args: argparse.Namespace) -> int:
     project_path = tasks_path.parent.resolve()
     backend = get_backend(args.backend or settings.default_backend, settings)
 
-    report = run_bench(project_path, tasks, backend, runs=args.runs)
+    report = run_bench(project_path, tasks, backend, runs=args.runs, settings=settings)
 
     for stats in report.task_stats:
         print(f"{stats.name} / {stats.pass_rate} / {stats.mean_iterations}")
@@ -253,6 +255,12 @@ def main(argv: list[str] | None = None) -> int:
         type=int,
         default=0,
         help="run up to N dependency-satisfied tasks concurrently (default 1)",
+    )
+    run.add_argument(
+        "--sandbox-network",
+        dest="sandbox_network",
+        action="store_true",
+        help="allow network egress inside the sandbox (default: deny)",
     )
     run.set_defaults(func=_run)
 

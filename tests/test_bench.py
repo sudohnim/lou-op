@@ -42,3 +42,38 @@ def test_bench_runs_are_isolated(repo: Path) -> None:
     run_bench(repo, [task], MockBackend(), runs=2)
     # after bench, the repo is back to its pre-bench state
     assert not (repo / "calc.py").exists()
+
+
+def test_preflight_not_counted_as_iteration(repo):
+    """A vacuously-green task passes at preflight (iteration 0) — the mean
+    must report 0 model iterations, not 1."""
+    from lou_op.backends.mock import MockBackend
+
+    task = Task(
+        name="vacuous",
+        success_criteria=["true"],  # green before any work
+        max_iterations=3,
+        allow_no_validators=False,
+    )
+    report = run_bench(repo, [task], MockBackend(), runs=2)
+    stats = report.task_stats[0]
+    assert stats.passes == 2
+    assert stats.mean_iterations == 0
+
+
+def test_bench_honors_strict_scope(repo):
+    """strict_scope in settings must change bench results exactly as it
+    changes run results (fail-closed when nothing is inferable)."""
+    from lou_op.backends.mock import MockBackend
+    from lou_op.config import Settings
+
+    task = Task(
+        name="no-scope",
+        description="Make everything better.",  # nothing inferable
+        success_criteria=["test -f impl.py"],  # red until impl exists
+        max_iterations=2,
+    )
+    settings = Settings()
+    settings.strict_scope = True
+    report = run_bench(repo, [task], MockBackend(), runs=1, settings=settings)
+    assert report.task_stats[0].passes == 0  # failed closed, as a run would

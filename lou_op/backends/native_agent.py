@@ -138,9 +138,17 @@ def _truncate(text: str, limit: int = _MAX_TOOL_RESULT_CHARS) -> str:
     return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
 
 
-def execute_tool(repo_path: Path, name: str, args: Dict[str, Any]) -> str:
+def execute_tool(
+    repo_path: Path,
+    name: str,
+    args: Dict[str, Any],
+    shell_fn: Optional[Callable] = None,
+) -> str:
     """Run one tool call locally. Errors come back as text, never exceptions —
-    the model should see its mistake and correct course."""
+    the model should see its mistake and correct course.
+
+    ``shell_fn`` routes the bash tool through a Runtime (docker/cloud
+    sandbox) so model-authored commands run where the validators run."""
     try:
         if name == "read_file":
             target = _jail(repo_path, args["path"])
@@ -167,6 +175,10 @@ def execute_tool(repo_path: Path, name: str, args: Dict[str, Any]) -> str:
             return f"edited {args['path']}"
 
         if name == "bash":
+            if shell_fn is not None:
+                res = shell_fn(args["command"], repo_path, timeout=_BASH_TIMEOUT_S)
+                out = (res.stdout + res.stderr).strip()
+                return _truncate(f"exit {res.returncode}\n{out}")
             result = subprocess.run(
                 args["command"],
                 shell=True,
@@ -214,9 +226,12 @@ class NativeAgentBackend(Backend):
         max_turns: int = 40,
         wall_timeout_s: int = 1800,
         request_timeout_s: int = 600,
+        max_job_tokens: int = 0,
         chat_fn: Optional[ChatFn] = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        from ..config import validate_base_url
+
+        self.base_url = validate_base_url(base_url.rstrip("/"))
         self.api_key = api_key
         self.model_id = model_id
         # "Bearer" for OpenRouter/vLLM/Modal, "Api-Key" for Baseten.
@@ -224,10 +239,22 @@ class NativeAgentBackend(Backend):
         self.max_turns = max_turns
         self.wall_timeout_s = wall_timeout_s
         self.request_timeout_s = request_timeout_s
+        # cumulative across the whole job (backend instance is per-job);
+        # 0 = unlimited
+        self.max_job_tokens = max_job_tokens
+        self.tokens_used = 0
         self._chat_fn = chat_fn or self._http_chat
+        self._runtime = None
+
+    def use_runtime(self, runtime) -> None:
+        # model-authored bash runs where validators run (same sandbox)
+        self._runtime = runtime
 
     def auth_header(self) -> Dict[str, str]:
         return {"Authorization": f"{self.auth_scheme} {self.api_key}"}
+
+    def _over_budget(self) -> bool:
+        return bool(self.max_job_tokens) and self.tokens_used >= self.max_job_tokens
 
     def _http_chat(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
@@ -244,7 +271,10 @@ class NativeAgentBackend(Backend):
             timeout=self.request_timeout_s,
         )
         response.raise_for_status()
-        return response.json()["choices"][0]["message"]
+        payload = response.json()
+        usage = payload.get("usage") or {}
+        self.tokens_used += int(usage.get("total_tokens") or 0)
+        return payload["choices"][0]["message"]
 
     def run_iteration(self, ctx: IterationContext) -> IterationOutput:
         emit = ctx.on_line or (lambda _: None)
@@ -261,6 +291,23 @@ class NativeAgentBackend(Backend):
                 raise TimeoutError(
                     f"native agent wall timeout ({self.wall_timeout_s}s)"
                 )
+            if self._over_budget():
+                emit(
+                    f"[native] token budget exhausted"
+                    f" ({self.tokens_used}/{self.max_job_tokens}) — aborting"
+                )
+                log.record(
+                    "budget_exceeded",
+                    {"tokens_used": self.tokens_used, "cap": self.max_job_tokens},
+                )
+                return IterationOutput(
+                    done=False,
+                    summary=(
+                        f"aborted: token budget exhausted"
+                        f" ({self.tokens_used}/{self.max_job_tokens})"
+                    ),
+                    log="",
+                )
             emit(f"[native] turn {turn}: calling {self.model_id} ...")
             msg = self._chat_fn(messages, _TOOLS)
             text = msg.get("content") or ""
@@ -270,6 +317,7 @@ class NativeAgentBackend(Backend):
                 emit(f"[native] final text ({len(text)} chars)")
                 done = has_done_sentinel(text)
                 summary = "; ".join(transcript[-10:]) or text[:500]
+                log.record("usage", {"tokens_total": self.tokens_used})
                 return IterationOutput(done=done, summary=summary, log=text)
 
             # Assistant message must be echoed back verbatim for the endpoint
@@ -286,7 +334,15 @@ class NativeAgentBackend(Backend):
                     args = {}
                 emit(f"[native] tool: {name}({_preview_args(args)})")
                 log.record("tool_call", {"name": name, **args})
-                result = execute_tool(ctx.repo_path, name, args)
+                shell_fn = None
+                if self._runtime is not None and name == "bash":
+                    # push model-written files to the sandbox, run there,
+                    # pull anything the command created back
+                    self._runtime.sync_in(ctx.repo_path)
+                    shell_fn = self._runtime.shell
+                result = execute_tool(ctx.repo_path, name, args, shell_fn=shell_fn)
+                if self._runtime is not None and name == "bash":
+                    self._runtime.sync_out(ctx.repo_path)
                 # empty result (e.g. read of an empty file) has no lines
                 first_line = result.splitlines()[0] if result else ""
                 log.record("tool_result", {"name": name, "result": first_line})
@@ -300,6 +356,7 @@ class NativeAgentBackend(Backend):
                 )
 
         emit(f"[native] max turns ({self.max_turns}) reached without done signal")
+        log.record("usage", {"tokens_total": self.tokens_used})
         return IterationOutput(
             done=False,
             summary="; ".join(transcript[-10:]) or "max turns reached",

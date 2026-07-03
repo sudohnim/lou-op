@@ -34,6 +34,22 @@ class TestScrubbedEnv:
         for key in SECRETS:
             assert key not in env
 
+    def test_allowlist_blocks_unanticipated_secrets(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The reason it's an allowlist: secrets we never named must not
+        leak either."""
+        for key in (
+            "AWS_SECRET_ACCESS_KEY",
+            "GH_TOKEN",
+            "GITHUB_TOKEN",
+            "DATABASE_URL",
+            "STRIPE_SECRET_KEY",
+        ):
+            monkeypatch.setenv(key, "leak-me")
+        env = scrubbed_env()
+        assert not any(v == "leak-me" for v in env.values())
+
     def test_keeps_normal_vars(self) -> None:
         env = scrubbed_env()
         assert "PATH" in env
