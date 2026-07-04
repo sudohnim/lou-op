@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+
+import pytest
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -200,3 +202,47 @@ class TestTokenBudget:
         events = [json.loads(ln) for ln in lines]
         usage = [e for e in events if e["event"] == "usage"]
         assert usage and usage[-1]["data"]["tokens_total"] == 777
+
+
+class TestCostCap:
+    """Spec (v3-A2): per-job USD ceiling from provider usage × prices."""
+
+    def test_cost_math(self):
+        b = NativeAgentBackend(
+            "http://localhost",
+            "k",
+            "m",
+            price_in_per_mtok=0.50,
+            price_out_per_mtok=2.00,
+        )
+        b.prompt_tokens = 1_000_000
+        b.completion_tokens = 500_000
+        assert b.cost_usd == pytest.approx(0.50 + 1.00)
+
+    def test_over_cost_cap_aborts(self, tmp_path):
+        calls = []
+        b = NativeAgentBackend(
+            "http://localhost",
+            "k",
+            "m",
+            max_cost_usd=1.00,
+            price_in_per_mtok=1.0,
+            price_out_per_mtok=1.0,
+            chat_fn=lambda m, t: calls.append(1)
+            or {"content": "<lou-done/>", "tool_calls": []},
+        )
+        b.prompt_tokens = 2_000_000  # $2 spent, cap $1
+        out = b.run_iteration(_ctx(tmp_path))
+        assert not calls and not out.done
+        assert "budget" in out.summary
+
+    def test_no_prices_means_cost_never_trips(self, tmp_path):
+        b = NativeAgentBackend(
+            "http://localhost",
+            "k",
+            "m",
+            max_cost_usd=1.00,
+            chat_fn=lambda m, t: {"content": "<lou-done/>", "tool_calls": []},
+        )
+        b.prompt_tokens = 10_000_000  # no prices configured → cost is $0
+        assert b.run_iteration(_ctx(tmp_path)).done

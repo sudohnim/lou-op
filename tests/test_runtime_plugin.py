@@ -102,3 +102,79 @@ class TestNativeBashThroughRuntime:
         )
         assert (tmp_path / "a.py").exists()
         assert rt.commands == []
+
+
+class TestGuardsSyncBeforeValidation:
+    """Spec (v3-A1): on a no-shared-FS runtime, validators must see the
+    guard-restored tree — not the model's tampered last push."""
+
+    def test_sync_in_called_between_guards_and_validation(self, tmp_path: Path) -> None:
+        import subprocess
+
+        from lou_op.loop import run_task
+        from lou_op.models import IterationContext, IterationOutput, Task
+        from lou_op.models import ValidationResult
+
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, capture_output=True)
+        (tmp_path / "tests_spec.py").write_text("original spec\n")
+        subprocess.run(["git", "add", "-A"], cwd=tmp_path, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-q", "-m", "seed"], cwd=tmp_path, capture_output=True
+        )
+
+        events: list[str] = []
+
+        class _SpyRuntime(FakeCloudRuntime):
+            def sync_in(self, repo_path: Path) -> None:
+                # record what the spec file contained AT SYNC TIME
+                events.append(
+                    "sync:" + (repo_path / "tests_spec.py").read_text().strip()
+                )
+
+        class _TamperBackend:
+            name = "tamper"
+            include_code = False
+            raw_api = False
+
+            def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+                # model tampers with the protected spec
+                (ctx.repo_path / "tests_spec.py").write_text("tampered\n")
+                (ctx.repo_path / "impl.py").write_text("x = 1\n")
+                return IterationOutput(done=True, summary="Wrote: impl.py", log="")
+
+            def use_runtime(self, runtime) -> None:
+                pass
+
+        class _SpecMustBeOriginal:
+            name = "spec-intact"
+
+            def run(self, repo_path: Path) -> ValidationResult:
+                events.append("validate")
+                # red at preflight (impl.py absent) so the loop actually
+                # runs; green only if impl exists AND spec is untampered
+                ok = (repo_path / "impl.py").exists() and (
+                    repo_path / "tests_spec.py"
+                ).read_text() == "original spec\n"
+                return ValidationResult(name=self.name, passed=ok, output="")
+
+        rt = _SpyRuntime()
+        task = Task(
+            name="t",
+            success_criteria=["true"],
+            protected_files=["tests_spec.py"],
+            max_iterations=1,
+        )
+        results = run_task(
+            tmp_path,
+            task,
+            _TamperBackend(),
+            validators=[_SpecMustBeOriginal()],
+            runtime=rt,
+        )
+        # the sync that precedes validation must carry the RESTORED spec
+        sync_events = [e for e in events if e.startswith("sync:")]
+        assert sync_events, "runtime.sync_in never called before validation"
+        assert sync_events[-1] == "sync:original spec"
+        last_validate = len(events) - 1 - events[::-1].index("validate")
+        assert events.index(sync_events[-1]) < last_validate
+        assert results[-1].passed

@@ -227,6 +227,9 @@ class NativeAgentBackend(Backend):
         wall_timeout_s: int = 1800,
         request_timeout_s: int = 600,
         max_job_tokens: int = 0,
+        max_cost_usd: float = 0.0,
+        price_in_per_mtok: float = 0.0,
+        price_out_per_mtok: float = 0.0,
         chat_fn: Optional[ChatFn] = None,
     ) -> None:
         from ..config import validate_base_url
@@ -242,7 +245,12 @@ class NativeAgentBackend(Backend):
         # cumulative across the whole job (backend instance is per-job);
         # 0 = unlimited
         self.max_job_tokens = max_job_tokens
+        self.max_cost_usd = max_cost_usd
+        self.price_in_per_mtok = price_in_per_mtok
+        self.price_out_per_mtok = price_out_per_mtok
         self.tokens_used = 0
+        self.prompt_tokens = 0
+        self.completion_tokens = 0
         self._chat_fn = chat_fn or self._http_chat
         self._runtime = None
 
@@ -253,8 +261,17 @@ class NativeAgentBackend(Backend):
     def auth_header(self) -> Dict[str, str]:
         return {"Authorization": f"{self.auth_scheme} {self.api_key}"}
 
+    @property
+    def cost_usd(self) -> float:
+        return (
+            self.prompt_tokens * self.price_in_per_mtok
+            + self.completion_tokens * self.price_out_per_mtok
+        ) / 1_000_000
+
     def _over_budget(self) -> bool:
-        return bool(self.max_job_tokens) and self.tokens_used >= self.max_job_tokens
+        if self.max_job_tokens and self.tokens_used >= self.max_job_tokens:
+            return True
+        return bool(self.max_cost_usd) and self.cost_usd >= self.max_cost_usd
 
     def _http_chat(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
@@ -274,6 +291,8 @@ class NativeAgentBackend(Backend):
         payload = response.json()
         usage = payload.get("usage") or {}
         self.tokens_used += int(usage.get("total_tokens") or 0)
+        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
+        self.completion_tokens += int(usage.get("completion_tokens") or 0)
         return payload["choices"][0]["message"]
 
     def run_iteration(self, ctx: IterationContext) -> IterationOutput:
@@ -293,18 +312,24 @@ class NativeAgentBackend(Backend):
                 )
             if self._over_budget():
                 emit(
-                    f"[native] token budget exhausted"
-                    f" ({self.tokens_used}/{self.max_job_tokens}) — aborting"
+                    "[native] budget exhausted"
+                    f" (tokens {self.tokens_used}/{self.max_job_tokens or '∞'},"
+                    f" ${self.cost_usd:.2f}/{self.max_cost_usd or '∞'}) — aborting"
                 )
                 log.record(
                     "budget_exceeded",
-                    {"tokens_used": self.tokens_used, "cap": self.max_job_tokens},
+                    {
+                        "tokens_used": self.tokens_used,
+                        "token_cap": self.max_job_tokens,
+                        "cost_usd": round(self.cost_usd, 4),
+                        "cost_cap_usd": self.max_cost_usd,
+                    },
                 )
                 return IterationOutput(
                     done=False,
                     summary=(
-                        f"aborted: token budget exhausted"
-                        f" ({self.tokens_used}/{self.max_job_tokens})"
+                        "aborted: budget exhausted"
+                        f" (tokens {self.tokens_used}, ${self.cost_usd:.2f})"
                     ),
                     log="",
                 )

@@ -1,9 +1,0 @@
-tasks:
-  - name: Calculator add()
-    description: Implement add(a, b) in calc.py with a passing pytest test.
-    success_criteria:
-      - python -m pytest -q
-    lint: false
-    max_iterations: 3
-    depends_on: []
-    status: passed

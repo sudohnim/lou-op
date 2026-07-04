@@ -50,8 +50,18 @@ def test_expired_deadline_stops_before_any_iteration(repo: Path) -> None:
     assert not any(r.iteration > 0 and r.done for r in results)
 
 
-def test_deadline_checked_between_iterations(repo: Path) -> None:
-    """First iteration runs; deadline passes during it; second never starts."""
+def test_deadline_checked_between_iterations(repo: Path, monkeypatch) -> None:
+    """First iteration runs; deadline passes during it; second never starts.
+    Deterministic: fake clock advances 10s per check — no wall-time races."""
+    import lou_op.loop as loop_mod
+
+    now = [1000.0]
+
+    def fake_monotonic() -> float:
+        now[0] += 10.0
+        return now[0]
+
+    monkeypatch.setattr(loop_mod.time, "monotonic", fake_monotonic)
     backend = _CountingBackend()
     task = Task(name="t", success_criteria=["true"], max_iterations=5)
     run_task(
@@ -59,7 +69,8 @@ def test_deadline_checked_between_iterations(repo: Path) -> None:
         task,
         backend,
         validators=[_NeverPass()],
-        deadline=time.monotonic() + 0.01,  # expires almost immediately
+        # first boundary check reads 1010 (ok), second reads 1020 (over)
+        deadline=1015.0,
     )
     assert backend.calls == 1  # got one shot, not five
 

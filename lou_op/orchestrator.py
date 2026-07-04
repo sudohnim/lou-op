@@ -385,6 +385,7 @@ class JobManager:
                 timeout=self.settings.inference_timeout_s,
                 strict_scope=self.settings.strict_scope,
                 deadline=job_deadline,
+                runtime=runtime,
                 on_line=on_line,
             )
             passed = bool(results) and results[-1].done

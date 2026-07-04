@@ -61,5 +61,8 @@ def get_backend(name: str, settings: Settings) -> Backend:
             wall_timeout_s=settings.native_wall_timeout_s,
             request_timeout_s=settings.inference_timeout_s,
             max_job_tokens=settings.max_job_tokens,
+            max_cost_usd=settings.max_cost_usd,
+            price_in_per_mtok=settings.price_in_per_mtok,
+            price_out_per_mtok=settings.price_out_per_mtok,
         )
     raise ValueError(f"unknown backend: {name!r}")

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -122,13 +123,81 @@ def _reset(args: argparse.Namespace) -> int:
     return 0
 
 
+def _tasks_from_prd(prd_path, project_path, settings, args):
+    """Decompose a markdown PRD into a frozen-spec task graph on disk.
+
+    Returns the tasks, or None on error (message already printed). Unless
+    --yes is given, pauses so a human can review the generated specs before
+    the impl loop runs (verifier-independence checkpoint, B3)."""
+    from .backends.raw_api import OpenRouterClient
+    from .prd import build_tasks_from_prd
+
+    if not settings.openrouter_api_key:
+        print("error: OPENROUTER_API_KEY required to decompose a PRD", file=sys.stderr)
+        return None
+
+    client = OpenRouterClient(
+        api_key=settings.openrouter_api_key,
+        model_id=settings.spec_model or settings.model_id,
+        base_url=settings.openrouter_base_url,
+        timeout=settings.inference_timeout_s,
+    )
+    print(f"decomposing PRD {prd_path.name} (spec model: {client.model_id}) ...")
+    try:
+        tasks = build_tasks_from_prd(
+            prd_path.read_text(encoding="utf-8"),
+            project_path,
+            client.generate,
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: PRD decomposition failed: {exc}", file=sys.stderr)
+        return None
+
+    # verifier-independence record: was the spec author a DIFFERENT model
+    # than the implementer, and did a human review the specs?
+    independent = bool(settings.spec_model) and (
+        settings.spec_model != (args.backend or settings.default_backend)
+    )
+    reviewed = getattr(args, "yes", False)
+    audit = project_path / ".lou-op"
+    audit.mkdir(parents=True, exist_ok=True)
+    (audit / "spec_provenance.json").write_text(
+        json.dumps(
+            {
+                "spec_model": client.model_id,
+                "separate_spec_author": independent,
+                "human_reviewed": not reviewed,  # False when --yes skips review
+                "tasks": [t.name for t in tasks],
+            },
+            indent=2,
+        )
+    )
+    if not independent:
+        print(
+            "  note: specs authored by the same model that will implement them"
+            " — set LOU_SPEC_MODEL to a stronger model for real independence"
+        )
+
+    print(f"\ngenerated {len(tasks)} task(s), specs written to disk:")
+    for task in tasks:
+        print(f"  - {task.name}: {task.protected_files} -> {task.allowed_paths}")
+
+    if not getattr(args, "yes", False):
+        print(
+            "\nReview the generated spec files above. They are the contract the"
+            "\nimplementer is graded against. Re-run with --yes to build, or"
+            "\nedit the specs first.",
+        )
+        return None
+    return tasks
+
+
 def _run(args: argparse.Namespace) -> int:
     tasks_path = Path(args.tasks)
     if not tasks_path.exists():
         print(f"tasks file not found: {tasks_path}", file=sys.stderr)
         return 2
 
-    tasks = load_tasks(tasks_path)
     settings = Settings.from_env()
     if args.jobs_dir:
         settings.jobs_dir = Path(args.jobs_dir)
@@ -143,6 +212,20 @@ def _run(args: argparse.Namespace) -> int:
 
     project_path = tasks_path.parent.resolve()
 
+    # front door: a markdown PRD is decomposed into a frozen-spec task graph;
+    # a .yaml/.yml tasks file is the escape hatch and loads as before
+    writeback_path = tasks_path
+    if tasks_path.suffix.lower() in (".md", ".markdown"):
+        tasks = _tasks_from_prd(tasks_path, project_path, settings, args)
+        if tasks is None:
+            return 1
+        # persist status to a generated yaml, never back into the PRD
+        writeback_path = project_path / ".lou-op" / "generated_tasks.yaml"
+        writeback_path.parent.mkdir(parents=True, exist_ok=True)
+        write_tasks(writeback_path, tasks)
+    else:
+        tasks = load_tasks(tasks_path)
+
     spec = JobSpec(
         project_name=args.project_name or tasks_path.stem,
         tasks=tasks,
@@ -152,7 +235,7 @@ def _run(args: argparse.Namespace) -> int:
     )
 
     manager = JobManager(settings)
-    state = manager.create(spec, run_async=True, tasks_path=tasks_path)
+    state = manager.create(spec, run_async=True, tasks_path=writeback_path)
 
     # drain log queue — prints lines in real time, blocks until job ends
     log_q = manager.get_log_queue(state.job_id)
@@ -261,6 +344,12 @@ def main(argv: list[str] | None = None) -> int:
         dest="sandbox_network",
         action="store_true",
         help="allow network egress inside the sandbox (default: deny)",
+    )
+    run.add_argument(
+        "--yes",
+        dest="yes",
+        action="store_true",
+        help="skip the PRD spec-review checkpoint and build immediately",
     )
     run.set_defaults(func=_run)
 

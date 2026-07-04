@@ -38,6 +38,14 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _env_float(name: str, default: float = 0.0) -> float:
+    value = os.getenv(name)
+    try:
+        return float(value) if value else default
+    except ValueError:
+        return default
+
+
 _LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1", "0.0.0.0"}
 
 
@@ -71,6 +79,9 @@ class Settings:
     agent_provider: str = "claude"
     agent_cli_path: str = "claude"
     agent_model: str = ""  # empty => CLI default; e.g. "haiku" to pin cheapest
+    # model that authors specs from a PRD; empty => model_id. Set to a
+    # STRONGER model than the implementer for verifier independence (B3).
+    spec_model: str = ""
 
     # raw-api + native backends (any OpenAI-compatible endpoint).
     model_id: str = "z-ai/glm-4.6"
@@ -92,6 +103,11 @@ class Settings:
     max_parallel: int = 1
     # hard cap on total provider tokens per job (0 = unlimited).
     max_job_tokens: int = 0
+    # hard cap on provider spend per job in USD (0 = unlimited). Needs the
+    # per-mtok prices below to convert usage into dollars.
+    max_cost_usd: float = 0.0
+    price_in_per_mtok: float = 0.0
+    price_out_per_mtok: float = 0.0
     # sandbox egress is DENY by default; opt in with LOU_SANDBOX_NETWORK=on
     # (only when the task legitimately needs package installs etc.).
     sandbox_network: bool = False
@@ -110,6 +126,7 @@ class Settings:
             default_backend=_env("LOU_BACKEND", "mock"),
             agent_provider=_env("LOU_AGENT_PROVIDER", "claude"),
             agent_model=_env("LOU_AGENT_MODEL", ""),
+            spec_model=_env("LOU_SPEC_MODEL", ""),
             agent_cli_path=_env("LOU_AGENT_CLI_PATH", "claude"),
             model_id=_env("LOU_MODEL_ID", "z-ai/glm-4.6"),
             openrouter_api_key=_env("OPENROUTER_API_KEY", ""),
@@ -124,6 +141,9 @@ class Settings:
             runtime=_env("LOU_RUNTIME", "host"),
             max_parallel=_env_int("LOU_MAX_PARALLEL", 1),
             max_job_tokens=_env_int("LOU_MAX_JOB_TOKENS", 0),
+            max_cost_usd=_env_float("LOU_MAX_COST_USD", 0.0),
+            price_in_per_mtok=_env_float("LOU_PRICE_IN_PER_MTOK", 0.0),
+            price_out_per_mtok=_env_float("LOU_PRICE_OUT_PER_MTOK", 0.0),
             sandbox_network=_env("LOU_SANDBOX_NETWORK", "off").lower() == "on",
             context_budget_tokens=_env_int("LOU_CONTEXT_BUDGET", 100_000),
             inference_timeout_s=_env_int("LOU_INFERENCE_TIMEOUT", 300),

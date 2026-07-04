@@ -26,6 +26,7 @@ from .state import render_state
 from .validators import Validator, build_validators
 
 if TYPE_CHECKING:
+    from .runtime import Runtime
     from .workspace import Workspace
 
 
@@ -176,6 +177,7 @@ def run_task(
     timeout: int = 300,
     strict_scope: bool = False,
     deadline: Optional[float] = None,
+    runtime: Optional["Runtime"] = None,
     on_line: Optional[Callable[[str], None]] = None,
 ) -> List[IterationResult]:
     """Iterate on ``task`` until it passes, signals done, or hits the cap.
@@ -292,6 +294,12 @@ def run_task(
 
         # "wrote files" now means work that *survived* the guards
         last_wrote_files = _has_uncommitted_changes(work_path)
+
+        # validators may run in a remote sandbox (Modal): push the
+        # guard-restored host tree there FIRST, or the sandbox would
+        # validate whatever the model's last bash call left behind
+        if runtime is not None:
+            runtime.sync_in(work_path)
 
         last_validation = [check.run(work_path) for check in checks]
         passed = all(v.passed for v in last_validation)
