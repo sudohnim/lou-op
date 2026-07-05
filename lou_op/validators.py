@@ -20,7 +20,8 @@ class Validator(ABC):
     name: str
 
     @abstractmethod
-    def run(self, repo_path: Path) -> ValidationResult: ...
+    def run(self, repo_path: Path) -> ValidationResult:
+        ...
 
 
 class CommandValidator(Validator):

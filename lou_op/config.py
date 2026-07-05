@@ -17,6 +17,11 @@ from dotenv import load_dotenv
 # override=False means real env vars always win over .env values.
 load_dotenv(override=False)
 
+# 2. Tool-global defaults (only fills in variables not already set)
+_tool_env = Path(__file__).resolve().parent.parent / ".env"
+if _tool_env.exists():
+    load_dotenv(_tool_env, override=False)
+
 
 def _env(name: str, default: str) -> str:
     value = os.getenv(name)

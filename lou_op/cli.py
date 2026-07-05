@@ -128,10 +128,32 @@ def _tasks_from_prd(prd_path, project_path, settings, args):
 
     Returns the tasks, or None on error (message already printed). Unless
     --yes is given, pauses so a human can review the generated specs before
-    the impl loop runs (verifier-independence checkpoint, B3)."""
-    from .backends.raw_api import OpenRouterClient
-    from .prd import build_tasks_from_prd
+    the impl loop runs (verifier-independence checkpoint, B3).
 
+    If a cached task graph exists from a prior decomposition, the cache is
+    reused and the spec model is not called again. Delete .lou-op/tasks.json
+    to force a fresh decomposition.
+    """
+    from .backends.raw_api import OpenRouterClient
+    from .prd import build_tasks_from_prd, load_cached_tasks
+
+    # ── Fast path: reuse cached task graph (no API call, no cost) ──────
+    cached = load_cached_tasks(project_path)
+    if cached is not None:
+        print(f"[prd] reusing cached specs ({len(cached)} tasks)")
+        print(f"[prd] delete .lou-op/tasks.json to force re-decomposition")
+
+        # Still respect the review checkpoint on first use of a fresh cache
+        if not getattr(args, "yes", False):
+            print(
+                "\nReview the generated spec files above. They are the contract the"
+                "\nimplementer is graded against. Re-run with --yes to build, or"
+                "\nedit the specs first.",
+            )
+            return None
+        return cached
+
+    # ── Slow path: fresh decomposition via the spec model ──────────────
     if not settings.openrouter_api_key:
         print("error: OPENROUTER_API_KEY required to decompose a PRD", file=sys.stderr)
         return None
@@ -142,7 +164,9 @@ def _tasks_from_prd(prd_path, project_path, settings, args):
         base_url=settings.openrouter_base_url,
         timeout=settings.inference_timeout_s,
     )
+
     print(f"decomposing PRD {prd_path.name} (spec model: {client.model_id}) ...")
+
     try:
         tasks = build_tasks_from_prd(
             prd_path.read_text(encoding="utf-8"),
@@ -158,29 +182,16 @@ def _tasks_from_prd(prd_path, project_path, settings, args):
     independent = bool(settings.spec_model) and (
         settings.spec_model != (args.backend or settings.default_backend)
     )
-    reviewed = getattr(args, "yes", False)
-    audit = project_path / ".lou-op"
-    audit.mkdir(parents=True, exist_ok=True)
-    (audit / "spec_provenance.json").write_text(
-        json.dumps(
-            {
-                "spec_model": client.model_id,
-                "separate_spec_author": independent,
-                "human_reviewed": not reviewed,  # False when --yes skips review
-                "tasks": [t.name for t in tasks],
-            },
-            indent=2,
-        )
-    )
-    if not independent:
-        print(
-            "  note: specs authored by the same model that will implement them"
-            " — set LOU_SPEC_MODEL to a stronger model for real independence"
-        )
 
-    print(f"\ngenerated {len(tasks)} task(s), specs written to disk:")
-    for task in tasks:
-        print(f"  - {task.name}: {task.protected_files} -> {task.allowed_paths}")
+    provenance = {
+        "spec_model": client.model_id,
+        "implementer_model": settings.model_id,
+        "independent_verifier": independent,
+        "reviewed": not getattr(args, "yes", False),
+    }
+    prov_path = project_path / ".lou-op" / "spec_provenance.json"
+    prov_path.parent.mkdir(parents=True, exist_ok=True)
+    prov_path.write_text(json.dumps(provenance, indent=2), encoding="utf-8")
 
     if not getattr(args, "yes", False):
         print(
@@ -189,8 +200,8 @@ def _tasks_from_prd(prd_path, project_path, settings, args):
             "\nedit the specs first.",
         )
         return None
-    return tasks
 
+    return tasks
 
 def _run(args: argparse.Namespace) -> int:
     tasks_path = Path(args.tasks)
