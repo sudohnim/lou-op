@@ -14,7 +14,7 @@ from .exec import run_command
 from .git_ops import current_commit, revert_to
 from .loop import run_task
 from .models import Task
-from .runtime import Runtime
+from .ports.workspace import Workspace as TreeWorkspace
 from .validators import build_validators
 
 
@@ -39,7 +39,7 @@ def run_bench(
     *,
     runs: int = 3,
     settings: Optional[Settings] = None,
-    runtime: Optional[Runtime] = None,
+    tree: Optional[TreeWorkspace] = None,
 ) -> BenchReport:
     """Run each task multiple times to measure pass rate and iteration count.
 
@@ -83,10 +83,15 @@ def run_bench(
                 revert_to(repo_path, initial_sha)
 
                 # Run the task with the run-equivalent configuration
+                shell_fn = None
+                if tree is not None:
+                    from .orchestrator import _tree_shell
+
+                    shell_fn = _tree_shell(tree)
                 validators = build_validators(
                     task,
                     settings.inference_timeout_s,
-                    shell_fn=runtime.shell if runtime is not None else None,
+                    shell_fn=shell_fn,
                 )
                 results = run_task(
                     repo_path,

@@ -9,7 +9,7 @@ from .extractor import SLMExtractor
 from .mock import MockBackend
 from .native_agent import NativeAgentBackend
 from .providers import ClaudeProvider, CodexProvider, Provider
-from .raw_api import OpenRouterClient, RawAPIBackend
+from .raw_api import OpenRouterClient
 
 
 def get_provider(name: str, cli_path: str, model: str = "") -> Provider:
@@ -31,14 +31,10 @@ def get_backend(name: str, settings: Settings) -> Backend:
         )
         return AgentCLIBackend(provider, silence_timeout=settings.silence_timeout_s)
     if key in ("raw-api", "raw_api", "raw"):
+        # folded into the native agent as its text-protocol capability
+        # mode (P5): same accounting, same tree, no separate backend
         if not settings.openrouter_api_key:
             raise ValueError("raw-api backend requires OPENROUTER_API_KEY")
-        client = OpenRouterClient(
-            settings.openrouter_api_key,
-            settings.model_id,
-            settings.openrouter_base_url,
-            settings.inference_timeout_s,
-        )
         extractor = None
         if settings.extractor_model_id:
             extractor_client = OpenRouterClient(
@@ -48,7 +44,19 @@ def get_backend(name: str, settings: Settings) -> Backend:
                 settings.inference_timeout_s,
             )
             extractor = SLMExtractor(extractor_client)
-        return RawAPIBackend(client, extractor)
+        return NativeAgentBackend(
+            base_url=settings.openrouter_base_url,
+            api_key=settings.openrouter_api_key,
+            model_id=settings.model_id,
+            auth_scheme=settings.auth_scheme,
+            request_timeout_s=settings.inference_timeout_s,
+            max_job_tokens=settings.max_job_tokens,
+            max_cost_usd=settings.max_cost_usd,
+            price_in_per_mtok=settings.price_in_per_mtok,
+            price_out_per_mtok=settings.price_out_per_mtok,
+            mode="text",
+            extractor=extractor,
+        )
     if key == "native":
         if not settings.openrouter_api_key:
             raise ValueError("native backend requires OPENROUTER_API_KEY")

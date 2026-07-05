@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from lou_op.adapters.workspace_host import HostWorkspace
 from lou_op.backends.native_agent import execute_tool
 from lou_op.exec import run_shell, run_streaming, scrubbed_env
 
@@ -78,7 +79,9 @@ class TestSubprocessesAreScrubbed:
 
     def test_native_bash_tool_does_not_leak(self, tmp_path: Path) -> None:
         out = execute_tool(
-            tmp_path, "bash", {"command": 'echo "key=$OPENROUTER_API_KEY"'}
+            HostWorkspace(tmp_path),
+            "bash",
+            {"command": 'echo "key=$OPENROUTER_API_KEY"'},
         )
         assert "sk-secret" not in out
 

@@ -27,9 +27,9 @@ class Backend(ABC):
     @abstractmethod
     def run_iteration(self, ctx: IterationContext) -> IterationOutput: ...
 
-    def use_runtime(self, runtime) -> None:
-        """Adopt a Runtime for model-influenced execution (bash tool etc.).
+    def use_workspace(self, tree) -> None:
+        """Adopt the job's Workspace (the ONE working tree, I1).
 
-        Default is a no-op; backends that execute commands (native)
-        override this so ALL model-authored commands go through the same
-        sandbox the validators use."""
+        Default is a no-op; backends that touch the world (native)
+        override this so every model-authored read/write/exec goes through
+        the same tree the guards and validators use."""

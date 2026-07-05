@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from lou_op.adapters.workspace_host import HostWorkspace
 from lou_op.backends.native_agent import execute_tool
 from lou_op.models import FileWrite
 from lou_op.protocol import write_files
@@ -31,7 +32,9 @@ class TestPrefixCollision:
         evil = root.parent / (root.name + "-evil")
         evil.mkdir()
         rel = f"../{root.name}-evil/pwned.py"
-        out = execute_tool(root, "write_file", {"path": rel, "content": "x"})
+        out = execute_tool(
+            HostWorkspace(root), "write_file", {"path": rel, "content": "x"}
+        )
         assert out.startswith("error:")
         assert not (evil / "pwned.py").exists()
 
@@ -45,7 +48,9 @@ class TestPrefixCollision:
 
 class TestDotDotEscape:
     def test_parent_escape_rejected(self, root: Path) -> None:
-        out = execute_tool(root, "write_file", {"path": "../evil.py", "content": "x"})
+        out = execute_tool(
+            HostWorkspace(root), "write_file", {"path": "../evil.py", "content": "x"}
+        )
         assert out.startswith("error:")
         assert not (root.parent / "evil.py").exists()
 
@@ -53,7 +58,7 @@ class TestDotDotEscape:
         # content distinct from the filename — the error message legitimately
         # echoes the offending path, which must not fail the leak assertion
         (root.parent / "secret.txt").write_text("hunter2-contents")
-        out = execute_tool(root, "read_file", {"path": "../secret.txt"})
+        out = execute_tool(HostWorkspace(root), "read_file", {"path": "../secret.txt"})
         assert out.startswith("error:")
         assert "hunter2-contents" not in out
 
@@ -65,7 +70,9 @@ class TestSymlinkEscape:
         outside = root.parent / "outside.txt"
         outside.write_text("original")
         os.symlink(outside, root / "link.txt")
-        out = execute_tool(root, "write_file", {"path": "link.txt", "content": "pwned"})
+        out = execute_tool(
+            HostWorkspace(root), "write_file", {"path": "link.txt", "content": "pwned"}
+        )
         assert out.startswith("error:")
         assert outside.read_text() == "original"
 
@@ -74,14 +81,18 @@ class TestSymlinkEscape:
         outside_dir.mkdir()
         os.symlink(outside_dir, root / "sneaky", target_is_directory=True)
         out = execute_tool(
-            root, "write_file", {"path": "sneaky/pwned.py", "content": "x"}
+            HostWorkspace(root),
+            "write_file",
+            {"path": "sneaky/pwned.py", "content": "x"},
         )
         assert out.startswith("error:")
         assert not (outside_dir / "pwned.py").exists()
 
     def test_dangling_symlink_outside_rejected(self, root: Path) -> None:
         os.symlink(root.parent / "nowhere.txt", root / "dangling.txt")
-        out = execute_tool(root, "write_file", {"path": "dangling.txt", "content": "x"})
+        out = execute_tool(
+            HostWorkspace(root), "write_file", {"path": "dangling.txt", "content": "x"}
+        )
         assert out.startswith("error:")
         assert not (root.parent / "nowhere.txt").exists()
 
@@ -89,7 +100,9 @@ class TestSymlinkEscape:
 class TestLegitPathsStillWork:
     def test_normal_write_and_read(self, root: Path) -> None:
         out = execute_tool(
-            root, "write_file", {"path": "pkg/mod.py", "content": "x = 1\n"}
+            HostWorkspace(root),
+            "write_file",
+            {"path": "pkg/mod.py", "content": "x = 1\n"},
         )
         assert not out.startswith("error:")
         assert (root / "pkg" / "mod.py").read_text() == "x = 1\n"
@@ -97,7 +110,7 @@ class TestLegitPathsStillWork:
     def test_symlink_inside_root_is_fine(self, root: Path) -> None:
         (root / "real.txt").write_text("hi")
         os.symlink(root / "real.txt", root / "alias.txt")
-        out = execute_tool(root, "read_file", {"path": "alias.txt"})
+        out = execute_tool(HostWorkspace(root), "read_file", {"path": "alias.txt"})
         assert out == "hi"
 
     def test_write_files_normal(self, root: Path) -> None:

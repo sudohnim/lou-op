@@ -115,17 +115,18 @@ def has_done_sentinel(text: str) -> bool:
 def write_files(repo_path: Path, files: List[FileWrite]) -> List[str]:
     """Write ``files`` under ``repo_path``; return the relative paths written.
 
-    Refuses paths that escape the repo root.
+    Jailing is the Workspace port's single implementation — the second
+    hand-rolled jail that used to live here is retired (I1).
     """
+    from .adapters.workspace_host import HostWorkspace
+    from .ports.workspace import WorkspaceError
+
+    tree = HostWorkspace(repo_path)
     written: List[str] = []
-    root = repo_path.resolve()
     for file in files:
-        # is_relative_to, not a prefix check — /x/repo-evil must not pass
-        # for root /x/repo. resolve() follows symlinks first.
-        target = (root / file.path).resolve()
-        if not target.is_relative_to(root):
-            raise ValueError(f"path escapes repo: {file.path}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(file.content, encoding="utf-8")
+        try:
+            tree.write(file.path, file.content)
+        except WorkspaceError as exc:
+            raise ValueError(str(exc)) from exc
         written.append(file.path)
     return written

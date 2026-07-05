@@ -45,6 +45,13 @@ def _parse_result(stdout: str) -> tuple[bool, str]:
 
 
 class AgentCLIBackend(Backend):
+    #: delegated CLIs are SECOND-CLASS for isolation (P5): the vendor CLI
+    #: must reach its third-party API, so a sandbox can contain its
+    #: filesystem/exec but cannot close that vendor egress — the exact
+    #: leak the privacy thesis exists to prevent. Use the native agent
+    #: when the data must not leave your infrastructure.
+    capability = "delegated"
+
     name = "agent-cli"
     include_code = False  # the agent reads the repo itself
     raw_api = False

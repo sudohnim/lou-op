@@ -8,6 +8,7 @@ import pytest
 from pathlib import Path
 from typing import Any, Dict, List
 
+from lou_op.adapters.workspace_host import HostWorkspace
 from lou_op.backends.native_agent import NativeAgentBackend, execute_tool
 from lou_op.models import IterationContext, Task
 
@@ -122,14 +123,14 @@ class TestToolLoop:
 class TestExecuteTool:
     def test_bash_runs_in_repo(self, repo: Path) -> None:
         (repo / "hi.txt").write_text("x")
-        result = execute_tool(repo, "bash", {"command": "ls"})
+        result = execute_tool(HostWorkspace(repo), "bash", {"command": "ls"})
         assert result.startswith("exit 0")
         assert "hi.txt" in result
 
     def test_edit_requires_unique_match(self, repo: Path) -> None:
         (repo / "f.py").write_text("a = 1\na = 1\n")
         result = execute_tool(
-            repo,
+            HostWorkspace(repo),
             "edit_file",
             {"path": "f.py", "old_string": "a = 1", "new_string": "b"},
         )
@@ -138,21 +139,25 @@ class TestExecuteTool:
     def test_edit_applies_once(self, repo: Path) -> None:
         (repo / "f.py").write_text("a = 1\n")
         execute_tool(
-            repo,
+            HostWorkspace(repo),
             "edit_file",
             {"path": "f.py", "old_string": "a = 1", "new_string": "a = 2"},
         )
         assert (repo / "f.py").read_text() == "a = 2\n"
 
     def test_read_escape_blocked(self, repo: Path) -> None:
-        result = execute_tool(repo, "read_file", {"path": "../../etc/passwd"})
+        result = execute_tool(
+            HostWorkspace(repo), "read_file", {"path": "../../etc/passwd"}
+        )
         assert result.startswith("error:")
 
     def test_unknown_tool(self, repo: Path) -> None:
-        assert execute_tool(repo, "rm_rf", {}).startswith("error: unknown tool")
+        assert execute_tool(HostWorkspace(repo), "rm_rf", {}).startswith(
+            "error: unknown tool"
+        )
 
     def test_errors_are_text_not_exceptions(self, repo: Path) -> None:
-        result = execute_tool(repo, "read_file", {"path": "missing.py"})
+        result = execute_tool(HostWorkspace(repo), "read_file", {"path": "missing.py"})
         assert result.startswith("error:")
 
 
@@ -246,3 +251,52 @@ class TestCostCap:
         )
         b.prompt_tokens = 10_000_000  # no prices configured → cost is $0
         assert b.run_iteration(_ctx(tmp_path)).done
+
+
+class TestTextProtocolMode:
+    """P5: the text file-protocol fallback is a capability mode of the ONE
+    agent — not a separate backend — and writes through the tree (I1)."""
+
+    def _text_backend(self, response: str):
+        return NativeAgentBackend(
+            "http://localhost",
+            "k",
+            "m",
+            mode="text",
+            chat_fn=lambda msgs, tools: {"content": response, "tool_calls": []},
+        )
+
+    def test_files_parsed_and_written_through_tree(self, tmp_path):
+        response = "<<<FILE impl.py>>>\nx = 1\n<<<END>>>\n<lou-done/>"
+        b = self._text_backend(response)
+        out = b.run_iteration(_ctx(tmp_path))
+        assert (tmp_path / "impl.py").read_text().rstrip() == "x = 1"
+        assert out.done
+
+    def test_escape_in_text_mode_jailed(self, tmp_path):
+        response = "<<<FILE ../evil.py>>>\npwn\n<<<END>>>"
+
+        b = self._text_backend(response)
+        import pytest as _p
+
+        from lou_op.ports.workspace import WorkspaceError
+
+        with _p.raises(WorkspaceError, match="escapes"):
+            b.run_iteration(_ctx(tmp_path))
+        assert not (tmp_path.parent / "evil.py").exists()
+
+    def test_capability_declared(self, tmp_path):
+        assert self._text_backend("x").capability == "text-protocol"
+        assert (
+            NativeAgentBackend(
+                "http://localhost",
+                "k",
+                "m",
+                chat_fn=lambda m, t: {"content": "", "tool_calls": []},
+            ).capability
+            == "tool-calls"
+        )
+
+    def test_unknown_mode_rejected(self):
+        with pytest.raises(ValueError, match="unknown agent mode"):
+            NativeAgentBackend("http://localhost", "k", "m", mode="psychic")

@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import fnmatch
-import re
-import subprocess
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable, List, Optional
@@ -26,8 +23,11 @@ from .state import render_state
 from .validators import Validator, build_validators
 
 if TYPE_CHECKING:
-    from .runtime import Runtime
     from .workspace import Workspace
+
+from .adapters.workspace_host import HostWorkspace
+from .domain.scope import EmptyScopeError, Scope
+from .ports.workspace import Workspace as TreeWorkspace
 
 
 def _status_tag(passed: bool, done: bool) -> str:
@@ -48,121 +48,17 @@ def _snapshot_protected(repo_path: Path, patterns: List[str]) -> dict[str, str]:
 
 
 def _restore_protected(
-    repo_path: Path, snapshot: dict[str, str], emit: Callable[[str], None]
+    tree: "TreeWorkspace", snapshot: dict[str, str], emit: Callable[[str], None]
 ) -> None:
     """Rewrite protected files if the model changed or deleted them."""
     for rel, content in snapshot.items():
-        target = repo_path / rel
-        if not target.exists() or target.read_text(encoding="utf-8") != content:
+        try:
+            current: Optional[str] = tree.read(rel)
+        except (OSError, ValueError):
+            current = None
+        if current != content:
             emit(f"[guard] restoring protected file: {rel}")
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-
-
-def _in_scope(rel: str, patterns: List[str]) -> bool:
-    for pattern in patterns:
-        if fnmatch.fnmatch(rel, pattern):
-            return True
-        # "dir/**" — fnmatch has no recursive glob, treat as prefix match
-        if pattern.endswith("/**") and rel.startswith(pattern[:-3].rstrip("/") + "/"):
-            return True
-    return False
-
-
-def _changed_paths(repo_path: Path) -> List[tuple[str, bool]]:
-    """``(relative_path, is_untracked)`` for every dirty path in the repo.
-
-    Uses ``-z`` (NUL-delimited): no C-style quoting of filenames with
-    spaces/unicode, and rename entries carry the original path as a separate
-    NUL-separated field. A rename contributes BOTH sides — the new path (to
-    remove if out of scope) and the original (to restore).
-    """
-    result = subprocess.run(
-        ["git", "status", "-z", "--porcelain"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-    changed: List[tuple[str, bool]] = []
-    fields = result.stdout.split("\0")
-    i = 0
-    while i < len(fields):
-        entry = fields[i]
-        i += 1
-        if not entry:
-            continue
-        status, rel = entry[:2], entry[3:]
-        changed.append((rel, status == "??"))
-        if status[0] in ("R", "C") and i < len(fields):  # rename/copy: orig next
-            changed.append((fields[i], False))
-            i += 1
-    return changed
-
-
-def _in_head(repo_path: Path, rel: str) -> bool:
-    result = subprocess.run(
-        ["git", "cat-file", "-e", f"HEAD:{rel}"],
-        cwd=repo_path,
-        capture_output=True,
-    )
-    return result.returncode == 0
-
-
-def _revert_one(repo_path: Path, rel: str, untracked: bool) -> None:
-    """Return one path to its HEAD state (or oblivion, if it isn't in HEAD)."""
-    target = repo_path / rel
-    if untracked:
-        if target.is_file():
-            target.unlink()
-        return
-    if _in_head(repo_path, rel):
-        # unstage + restore work tree from HEAD (covers staged renames' orig)
-        subprocess.run(
-            ["git", "checkout", "HEAD", "--", rel],
-            cwd=repo_path,
-            capture_output=True,
-        )
-    else:
-        # staged but not in HEAD (e.g. the new side of a rename): drop it
-        subprocess.run(
-            ["git", "rm", "-q", "-f", "--cached", rel],
-            cwd=repo_path,
-            capture_output=True,
-        )
-        if target.is_file():
-            target.unlink()
-
-
-def _infer_scope(task: Task) -> List[str]:
-    """strict_scope with no allowed_paths: files named in the task description
-    are the scope. Anything the model touches beyond them gets reverted."""
-    return re.findall(r"[\w./-]*\w\.\w+", task.description)
-
-
-def _revert_out_of_scope(
-    repo_path: Path,
-    allowed: List[str],
-    emit: Callable[[str], None],
-) -> None:
-    """Undo model changes outside ``allowed`` globs (``.lou-op/`` is exempt)."""
-    if not allowed:
-        return
-    for rel, untracked in _changed_paths(repo_path):
-        if rel.startswith(".lou-op/") or _in_scope(rel, allowed):
-            continue
-        emit(f"[guard] reverting out-of-scope change: {rel}")
-        _revert_one(repo_path, rel, untracked)
-
-
-def _has_uncommitted_changes(repo_path: Path) -> bool:
-    """True if the backend wrote any files (checked before committing)."""
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=repo_path,
-        capture_output=True,
-        text=True,
-    )
-    return bool(result.stdout.strip())
+            tree.write(rel, content)
 
 
 def run_task(
@@ -177,7 +73,7 @@ def run_task(
     timeout: int = 300,
     strict_scope: bool = False,
     deadline: Optional[float] = None,
-    runtime: Optional["Runtime"] = None,
+    tree: Optional[TreeWorkspace] = None,
     on_line: Optional[Callable[[str], None]] = None,
 ) -> List[IterationResult]:
     """Iterate on ``task`` until it passes, signals done, or hits the cap.
@@ -185,8 +81,14 @@ def run_task(
     ``deadline`` is a time.monotonic() timestamp — the job's wall-clock
     ceiling. Checked at every iteration boundary; breach stops the task
     cleanly (statuses already persisted by the caller's writeback).
+
+    ``tree`` is the Workspace port owning the working tree (I1): guards,
+    validator exec and the agent's tools all operate on this one tree.
+    Defaults to a HostWorkspace over ``repo_path``.
     """
     emit = on_line or (lambda _: None)
+    if tree is None:
+        tree = HostWorkspace(repo_path)
     checks = validators if validators is not None else build_validators(task, timeout)
     results: List[IterationResult] = []
     last_validation: List[ValidationResult] = []
@@ -194,23 +96,25 @@ def run_task(
     last_claimed_done: bool = False  # whether the model signalled done last iteration
     work_path = workspace.path if workspace is not None else repo_path
     protected = _snapshot_protected(work_path, task.protected_files)
-    # strict mode: no declared scope ≠ unlimited scope — infer it from the
-    # files the task description names
-    scope = task.allowed_paths
-    if strict_scope and not scope:
-        scope = _infer_scope(task)
-        if not scope:
-            # fail CLOSED: inference found nothing, so under strict mode the
-            # model gets no write scope at all — never unlimited by accident
-            emit(
-                "[guard] strict scope: no allowed_paths and no files named in"
-                f" the description of '{task.name}' — failing closed"
+    # scope policy is a domain object: strict + nothing inferable fails
+    # CLOSED there (EmptyScopeError), never unlimited by accident
+    try:
+        scope_policy = Scope.from_task(
+            task.allowed_paths,
+            task.protected_files,
+            strict=strict_scope,
+            description=task.description,
+        )
+    except EmptyScopeError:
+        emit(
+            "[guard] strict scope: no allowed_paths and no files named in"
+            f" the description of '{task.name}' — failing closed"
+        )
+        return [
+            IterationResult(
+                iteration=0, passed=False, done=False, commit="", validations=[]
             )
-            return [
-                IterationResult(
-                    iteration=0, passed=False, done=False, commit="", validations=[]
-                )
-            ]
+        ]
 
     # Anti-gaming pre-flight: a healthy spec is red before any work. If the
     # validators already pass, either the task is done (resume) or the spec is
@@ -288,18 +192,15 @@ def run_task(
         last_claimed_done = output.done
 
         # guards run before anything is measured or validated:
-        # out-of-scope changes are reverted, tampered spec files restored
-        _revert_out_of_scope(work_path, scope, emit)
-        _restore_protected(work_path, protected, emit)
+        # out-of-scope changes are reverted, tampered spec files restored.
+        # One tree (I1): the same Workspace the validators and agent use,
+        # so remote loci can never grade a different state than the guards
+        # produced — transfer, if any, is internal to tree.exec.
+        scope_policy.enforce(tree, emit)
+        _restore_protected(tree, protected, emit)
 
         # "wrote files" now means work that *survived* the guards
-        last_wrote_files = _has_uncommitted_changes(work_path)
-
-        # validators may run in a remote sandbox (Modal): push the
-        # guard-restored host tree there FIRST, or the sandbox would
-        # validate whatever the model's last bash call left behind
-        if runtime is not None:
-            runtime.sync_in(work_path)
+        last_wrote_files = bool(tree.changed_paths())
 
         last_validation = [check.run(work_path) for check in checks]
         passed = all(v.passed for v in last_validation)

@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from lou_op.backends.native_agent import NativeAgentBackend, execute_tool
 from lou_op.exec import CmdResult
 from lou_op.runtime import HostRuntime, Runtime, get_runtime, register_runtime
 
@@ -52,9 +51,34 @@ class TestRegistry:
         rt.sync_out(tmp_path)
 
 
-class TestNativeBashThroughRuntime:
-    def test_bash_routed_and_synced(self, tmp_path: Path) -> None:
-        rt = FakeCloudRuntime()
+class FakeCloudTree:
+    """A Workspace fake for a no-shared-FS locus: records every exec."""
+
+    def __init__(self, root: Path) -> None:
+        from lou_op.adapters.workspace_host import HostWorkspace
+
+        self._host = HostWorkspace(root)
+        self.root = self._host.root
+        self.commands: list[str] = []
+
+    def __getattr__(self, name):  # tree/vcs ops delegate to host
+        return getattr(self._host, name)
+
+    def exec(self, command: str, *, timeout: int = 300, deadline=None):
+        from lou_op.ports.workspace import ExecResult
+
+        self.commands.append(command)
+        return ExecResult(0, "cloud-ok", "")
+
+
+class TestNativeToolsThroughWorkspace:
+    """Refactor P1 (I1/I7): every native tool call flows through the job's
+    ONE Workspace — no per-call sync choreography to forget."""
+
+    def test_bash_routed_through_tree(self, tmp_path: Path) -> None:
+        from lou_op.backends.native_agent import NativeAgentBackend
+
+        tree = FakeCloudTree(tmp_path)
         script = iter(
             [
                 {
@@ -76,41 +100,39 @@ class TestNativeBashThroughRuntime:
         backend = NativeAgentBackend(
             "http://localhost", "k", "m", chat_fn=lambda m, t: next(script)
         )
-        backend.use_runtime(rt)
+        backend.use_workspace(tree)
         from tests.test_native_agent import _ctx
 
         out = backend.run_iteration(_ctx(tmp_path))
-        assert rt.commands == ["pytest -q"]  # ran in the sandbox, not host
-        assert rt.synced_in == 1 and rt.synced_out == 1
+        assert tree.commands == ["pytest -q"]  # ran on the tree, not host
         assert out.done
 
-    def test_execute_tool_shell_fn_output_shape(self, tmp_path: Path) -> None:
-        rt = FakeCloudRuntime()
-        out = execute_tool(tmp_path, "bash", {"command": "echo hi"}, shell_fn=rt.shell)
+    def test_execute_tool_exec_output_shape(self, tmp_path: Path) -> None:
+        from lou_op.backends.native_agent import execute_tool
+
+        tree = FakeCloudTree(tmp_path)
+        out = execute_tool(tree, "bash", {"command": "echo hi"})
         assert out.startswith("exit 0")
         assert "cloud-ok" in out
 
-    def test_file_tools_stay_local(self, tmp_path: Path) -> None:
-        """Only bash routes through the runtime; file tools are host-side
-        (the host repo is the source of truth, synced around bash)."""
-        rt = FakeCloudRuntime()
-        execute_tool(
-            tmp_path,
-            "write_file",
-            {"path": "a.py", "content": "x"},
-            shell_fn=rt.shell,
-        )
+    def test_file_tools_use_the_same_tree(self, tmp_path: Path) -> None:
+        from lou_op.backends.native_agent import execute_tool
+
+        tree = FakeCloudTree(tmp_path)
+        execute_tool(tree, "write_file", {"path": "a.py", "content": "x"})
         assert (tmp_path / "a.py").exists()
-        assert rt.commands == []
+        assert tree.commands == []  # file ops need no exec
 
 
-class TestGuardsSyncBeforeValidation:
-    """Spec (v3-A1): on a no-shared-FS runtime, validators must see the
-    guard-restored tree — not the model's tampered last push."""
+class TestOneTreeGuardsAndValidation:
+    """The A1 bug class is structurally dead: guards and validators operate
+    on the SAME Workspace object, so a validator can never grade a tree the
+    guards did not produce."""
 
-    def test_sync_in_called_between_guards_and_validation(self, tmp_path: Path) -> None:
+    def test_validator_sees_guard_restored_spec(self, tmp_path: Path) -> None:
         import subprocess
 
+        from lou_op.adapters.workspace_host import HostWorkspace
         from lou_op.loop import run_task
         from lou_op.models import IterationContext, IterationOutput, Task
         from lou_op.models import ValidationResult
@@ -122,14 +144,7 @@ class TestGuardsSyncBeforeValidation:
             ["git", "commit", "-q", "-m", "seed"], cwd=tmp_path, capture_output=True
         )
 
-        events: list[str] = []
-
-        class _SpyRuntime(FakeCloudRuntime):
-            def sync_in(self, repo_path: Path) -> None:
-                # record what the spec file contained AT SYNC TIME
-                events.append(
-                    "sync:" + (repo_path / "tests_spec.py").read_text().strip()
-                )
+        tree = HostWorkspace(tmp_path)
 
         class _TamperBackend:
             name = "tamper"
@@ -137,27 +152,24 @@ class TestGuardsSyncBeforeValidation:
             raw_api = False
 
             def run_iteration(self, ctx: IterationContext) -> IterationOutput:
-                # model tampers with the protected spec
                 (ctx.repo_path / "tests_spec.py").write_text("tampered\n")
                 (ctx.repo_path / "impl.py").write_text("x = 1\n")
                 return IterationOutput(done=True, summary="Wrote: impl.py", log="")
 
-            def use_runtime(self, runtime) -> None:
+            def use_workspace(self, t) -> None:
                 pass
 
-        class _SpecMustBeOriginal:
+        class _SpecIntactViaTree:
+            """Reads through the SAME tree the guards restored."""
+
             name = "spec-intact"
 
             def run(self, repo_path: Path) -> ValidationResult:
-                events.append("validate")
-                # red at preflight (impl.py absent) so the loop actually
-                # runs; green only if impl exists AND spec is untampered
                 ok = (repo_path / "impl.py").exists() and (
-                    repo_path / "tests_spec.py"
-                ).read_text() == "original spec\n"
+                    tree.read("tests_spec.py") == "original spec\n"
+                )
                 return ValidationResult(name=self.name, passed=ok, output="")
 
-        rt = _SpyRuntime()
         task = Task(
             name="t",
             success_criteria=["true"],
@@ -168,13 +180,7 @@ class TestGuardsSyncBeforeValidation:
             tmp_path,
             task,
             _TamperBackend(),
-            validators=[_SpecMustBeOriginal()],
-            runtime=rt,
+            validators=[_SpecIntactViaTree()],
+            tree=tree,
         )
-        # the sync that precedes validation must carry the RESTORED spec
-        sync_events = [e for e in events if e.startswith("sync:")]
-        assert sync_events, "runtime.sync_in never called before validation"
-        assert sync_events[-1] == "sync:original spec"
-        last_validate = len(events) - 1 - events[::-1].index("validate")
-        assert events.index(sync_events[-1]) < last_validate
-        assert results[-1].passed
+        assert results[-1].passed  # tamper restored BEFORE validation, one tree

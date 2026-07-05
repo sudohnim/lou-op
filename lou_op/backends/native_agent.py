@@ -14,16 +14,14 @@ never needs network access and the repo never leaves the machine.
 from __future__ import annotations
 
 import json
-import subprocess
 import time
-from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
-import httpx
-
+from ..adapters.workspace_host import HostWorkspace
 from ..audit import AuditLog
-from ..exec import scrubbed_env
+from ..ports.provider import Provider
 from ..models import IterationContext, IterationOutput
+from ..ports.workspace import Workspace, WorkspaceError
 from ..protocol import DONE_SENTINEL, has_done_sentinel
 from .base import Backend
 
@@ -117,91 +115,48 @@ _TOOLS: List[Dict[str, Any]] = [
 ]
 
 
-def _jail(repo_path: Path, rel: str) -> Path:
-    """Resolve ``rel`` under the repo root; refuse escapes (write_files rule).
-
-    ``is_relative_to`` after resolving — a plain prefix check would accept
-    sibling dirs sharing the prefix (``/x/repo-evil`` for root ``/x/repo``).
-    resolve() also follows symlinks (including dangling ones), so a link
-    inside the repo pointing outside resolves outside and is rejected.
-    """
-    root = repo_path.resolve()
-    target = (root / rel).resolve()
-    if not target.is_relative_to(root):
-        raise ValueError(f"path escapes repo: {rel}")
-    return target
-
-
 def _truncate(text: str, limit: int = _MAX_TOOL_RESULT_CHARS) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n... [truncated {len(text) - limit} chars]"
 
 
-def execute_tool(
-    repo_path: Path,
-    name: str,
-    args: Dict[str, Any],
-    shell_fn: Optional[Callable] = None,
-) -> str:
-    """Run one tool call locally. Errors come back as text, never exceptions —
-    the model should see its mistake and correct course.
+def execute_tool(tree: Workspace, name: str, args: Dict[str, Any]) -> str:
+    """Run one tool call against the job's Workspace. Errors come back as
+    text, never exceptions — the model should see its mistake and correct
+    course.
 
-    ``shell_fn`` routes the bash tool through a Runtime (docker/cloud
-    sandbox) so model-authored commands run where the validators run."""
+    The Workspace owns the path jail, the scrubbed env, and the execution
+    locus (host/docker/modal) — this function has no world access of its
+    own (I1/I7)."""
     try:
         if name == "read_file":
-            target = _jail(repo_path, args["path"])
-            return _truncate(target.read_text(encoding="utf-8"), _MAX_READ_CHARS)
+            return _truncate(tree.read(args["path"]), _MAX_READ_CHARS)
 
         if name == "write_file":
-            target = _jail(repo_path, args["path"])
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(args["content"], encoding="utf-8")
+            tree.write(args["path"], args["content"])
             return f"wrote {args['path']} ({len(args['content'])} chars)"
 
         if name == "edit_file":
-            target = _jail(repo_path, args["path"])
-            text = target.read_text(encoding="utf-8")
-            old = args["old_string"]
-            count = text.count(old)
-            if count == 0:
-                return "error: old_string not found in file"
-            if count > 1:
-                return f"error: old_string appears {count} times; must be unique"
-            target.write_text(
-                text.replace(old, args["new_string"], 1), encoding="utf-8"
-            )
+            try:
+                tree.edit(args["path"], args["old_string"], args["new_string"])
+            except WorkspaceError as exc:
+                return f"error: {exc}"
             return f"edited {args['path']}"
 
         if name == "bash":
-            if shell_fn is not None:
-                res = shell_fn(args["command"], repo_path, timeout=_BASH_TIMEOUT_S)
-                out = (res.stdout + res.stderr).strip()
-                return _truncate(f"exit {res.returncode}\n{out}")
-            result = subprocess.run(
-                args["command"],
-                shell=True,
-                cwd=repo_path,
-                capture_output=True,
-                text=True,
-                timeout=_BASH_TIMEOUT_S,
-                env=scrubbed_env(),  # model-authored command: no secrets
-            )
-            out = (result.stdout + result.stderr).strip()
-            return _truncate(f"exit {result.returncode}\n{out}")
+            res = tree.exec(args["command"], timeout=_BASH_TIMEOUT_S)
+            if res.killed:
+                return f"error: command timed out after {_BASH_TIMEOUT_S}s"
+            out = (res.stdout + res.stderr).strip()
+            return _truncate(f"exit {res.returncode}\n{out}")
 
         if name == "list_dir":
-            target = _jail(repo_path, args.get("path", "."))
-            entries = sorted(
-                e.name + ("/" if e.is_dir() else "") for e in target.iterdir()
-            )
+            entries = tree.list(args.get("path", "."))
             return "\n".join(entries) or "(empty)"
 
         return f"error: unknown tool {name}"
-    except subprocess.TimeoutExpired:
-        return f"error: command timed out after {_BASH_TIMEOUT_S}s"
-    except (OSError, ValueError, KeyError) as exc:
+    except (OSError, ValueError, KeyError, WorkspaceError) as exc:
         return f"error: {exc}"
 
 
@@ -231,6 +186,9 @@ class NativeAgentBackend(Backend):
         price_in_per_mtok: float = 0.0,
         price_out_per_mtok: float = 0.0,
         chat_fn: Optional[ChatFn] = None,
+        provider: Optional[Provider] = None,
+        mode: str = "tools",
+        extractor=None,
     ) -> None:
         from ..config import validate_base_url
 
@@ -251,12 +209,24 @@ class NativeAgentBackend(Backend):
         self.tokens_used = 0
         self.prompt_tokens = 0
         self.completion_tokens = 0
-        self._chat_fn = chat_fn or self._http_chat
-        self._runtime = None
+        # all real inference flows through the Provider port (P4/I5);
+        # chat_fn remains the deterministic test seam
+        self._provider = provider
+        self._chat_fn = chat_fn or self._provider_chat
+        self._tree: Optional[Workspace] = None
+        # capability mode (P5): "tools" needs endpoint tool_calls support;
+        # "text" is the file-protocol fallback for endpoints without it
+        # (vLLM w/o --enable-auto-tool-choice — the open-weight common case)
+        if mode not in ("tools", "text"):
+            raise ValueError(f"unknown agent mode: {mode!r} (tools | text)")
+        self.mode = mode
+        self.capability = "tool-calls" if mode == "tools" else "text-protocol"
+        self.raw_api = mode == "text"  # loop builds the file-protocol prompt
+        self._extractor = extractor
 
-    def use_runtime(self, runtime) -> None:
-        # model-authored bash runs where validators run (same sandbox)
-        self._runtime = runtime
+    def use_workspace(self, tree: Workspace) -> None:
+        # every tool call operates on the job's ONE tree (I1)
+        self._tree = tree
 
     def auth_header(self) -> Dict[str, str]:
         return {"Authorization": f"{self.auth_scheme} {self.api_key}"}
@@ -273,29 +243,32 @@ class NativeAgentBackend(Backend):
             return True
         return bool(self.max_cost_usd) and self.cost_usd >= self.max_cost_usd
 
-    def _http_chat(
+    def _provider_chat(
         self, messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]
     ) -> Dict[str, Any]:
-        response = httpx.post(
-            f"{self.base_url}/chat/completions",
-            headers=self.auth_header(),
-            json={
-                "model": self.model_id,
-                "messages": messages,
-                "tools": tools,
-                "temperature": 0.2,
-            },
-            timeout=self.request_timeout_s,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        usage = payload.get("usage") or {}
-        self.tokens_used += int(usage.get("total_tokens") or 0)
-        self.prompt_tokens += int(usage.get("prompt_tokens") or 0)
-        self.completion_tokens += int(usage.get("completion_tokens") or 0)
-        return payload["choices"][0]["message"]
+        if self._provider is None:
+            from ..adapters.provider_openai import OpenAICompatProvider
+
+            self._provider = OpenAICompatProvider(
+                self.base_url,
+                self.api_key,
+                self.model_id,
+                auth_scheme=self.auth_scheme,
+                timeout=self.request_timeout_s,
+                price_in_per_mtok=self.price_in_per_mtok,
+                price_out_per_mtok=self.price_out_per_mtok,
+            )
+        completion = self._provider.complete(messages, tools)
+        # mirror the provider's cumulative accounting for budget checks
+        self.tokens_used = self._provider.usage.total
+        self.prompt_tokens = self._provider.usage.prompt_tokens
+        self.completion_tokens = self._provider.usage.completion_tokens
+        return completion.message
 
     def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+        tree = self._tree or HostWorkspace(ctx.repo_path)
+        if self.mode == "text":
+            return self._run_text_iteration(ctx, tree)
         emit = ctx.on_line or (lambda _: None)
         log = AuditLog(ctx.repo_path)
         messages: List[Dict[str, Any]] = [
@@ -359,15 +332,7 @@ class NativeAgentBackend(Backend):
                     args = {}
                 emit(f"[native] tool: {name}({_preview_args(args)})")
                 log.record("tool_call", {"name": name, **args})
-                shell_fn = None
-                if self._runtime is not None and name == "bash":
-                    # push model-written files to the sandbox, run there,
-                    # pull anything the command created back
-                    self._runtime.sync_in(ctx.repo_path)
-                    shell_fn = self._runtime.shell
-                result = execute_tool(ctx.repo_path, name, args, shell_fn=shell_fn)
-                if self._runtime is not None and name == "bash":
-                    self._runtime.sync_out(ctx.repo_path)
+                result = execute_tool(tree, name, args)
                 # empty result (e.g. read of an empty file) has no lines
                 first_line = result.splitlines()[0] if result else ""
                 log.record("tool_result", {"name": name, "result": first_line})
@@ -386,6 +351,50 @@ class NativeAgentBackend(Backend):
             done=False,
             summary="; ".join(transcript[-10:]) or "max turns reached",
             log="\n".join(transcript),
+        )
+
+    def _run_text_iteration(
+        self, ctx: IterationContext, tree: Workspace
+    ) -> IterationOutput:
+        """Text file-protocol fallback (P5): one accounted completion, files
+        parsed from the response and written THROUGH the tree (I1) — the
+        old raw-api backend wrote to the host directly; this mode inherits
+        the jail and locus for free."""
+        from ..protocol import parse_files, parse_scratchpad
+
+        emit = ctx.on_line or (lambda _: None)
+        log = AuditLog(ctx.repo_path)
+        emit(f"[native:text] calling {self.model_id} ...")
+        msg = self._chat_fn([{"role": "user", "content": ctx.prompt}], [])
+        text = msg.get("content") or ""
+        if self._extractor is not None:
+            text = self._extractor.extract(text)
+        files = parse_files(text)
+        written: List[str] = []
+        for file in files:
+            tree.write(file.path, file.content)
+            log.record("tool_call", {"name": "write_file", "path": file.path})
+            written.append(file.path)
+        emit(f"[native:text] wrote {len(written)} file(s): {written}")
+        done = has_done_sentinel(text)
+        if done and not written:
+            src = [
+                p
+                for p in ctx.repo_path.rglob("*")
+                if p.is_file()
+                and not p.name.startswith(".")
+                and ".lou-op" not in str(p)
+            ]
+            if not src:
+                emit("[native:text] done claimed but repo empty — continuing")
+                done = False
+        log.record("usage", {"tokens_total": self.tokens_used})
+        summary = f"Wrote: {', '.join(written)}" if written else text[:500]
+        return IterationOutput(
+            done=done,
+            summary=summary,
+            log=text,
+            scratchpad=parse_scratchpad(text),
         )
 
 

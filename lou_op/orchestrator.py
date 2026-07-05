@@ -21,11 +21,15 @@ from .backends.extractor import LLMClient
 from .backends.raw_api import OpenRouterClient
 from .backends.registry import get_backend
 from .config import Settings
+from .domain.graph import Node, TaskGraph
 from .git_ops import log
 from .judge import ConsistencyJudge
 from .loop import run_task
 from .models import JobSpec, JobState, JobStatus, Task, TaskStatus
-from .runtime import get_runtime
+from .adapters.store_sqlite import SqliteStore
+from .adapters.workspace_docker import DockerWorkspace
+from .adapters.workspace_host import HostWorkspace
+from .ports.workspace import Workspace as TreeWorkspace
 from .validators import build_validators
 from .workspace import GitWorkspace, NullWorkspace, Workspace
 
@@ -102,20 +106,18 @@ def _make_workspace(spec: JobSpec, settings: Settings) -> Workspace:
 
 
 def ready_tasks(tasks: List[Task]) -> List[Task]:
-    """All tasks runnable right now: PENDING/IN_PROGRESS with every
-    dependency PASSED, in list order. (Cycle/failed-dep detection lives in
-    select_next_task / run_parallel — this is the pure readiness filter.)"""
+    """All tasks runnable right now — a thin shim over the pure
+    ``domain.graph.TaskGraph`` (P7): readiness/ordering decisions are
+    domain logic; this just maps Task objects in and out."""
     by_name = {t.name: t for t in tasks}
-    out: List[Task] = []
-    for task in tasks:
-        if task.status not in (TaskStatus.PENDING, TaskStatus.IN_PROGRESS):
-            continue
-        deps = [by_name.get(name) for name in task.depends_on]
-        if any(d is None for d in deps):
-            continue
-        if all(d.status == TaskStatus.PASSED for d in deps):
-            out.append(task)
-    return out
+    known = [t for t in tasks if all(d in by_name for d in t.depends_on)]
+    graph = TaskGraph([Node(t.name, tuple(t.depends_on)) for t in known])
+    status = {t.name: t.status.value for t in known}
+    ordered = graph.ready(status)
+    # preserve declaration order (graph.ready sorts resumable first; the
+    # scheduler relies on list order for serial reproduction)
+    order_index = {t.name: i for i, t in enumerate(tasks)}
+    return [by_name[n] for n in sorted(ordered, key=lambda n: order_index[n])]
 
 
 def run_parallel(
@@ -176,6 +178,29 @@ def run_parallel(
             f"tasks blocked and cannot run: {names}"
             " (failed dependency, unknown dependency, or cycle)"
         )
+
+
+def _make_tree(kind: str, root: Path, *, network: bool = False) -> TreeWorkspace:
+    """Workspace factory: which locus executes model-influenced commands."""
+    key = (kind or "host").strip().lower()
+    if key == "host":
+        return HostWorkspace(root)
+    if key == "docker":
+        return DockerWorkspace(root, network=network)
+    if key == "modal":
+        from .adapters.workspace_modal import ModalWorkspace  # lazy: modal SDK
+
+        return ModalWorkspace(root, network=network)
+    raise ValueError(f"unknown runtime: {kind!r} (host | docker | modal)")
+
+
+def _tree_shell(tree: TreeWorkspace):
+    """Adapt Workspace.exec to the validators' shell_fn(cmd, cwd, timeout)."""
+
+    def shell(command: str, cwd: Path, *, timeout: int = 300):
+        return tree.exec(command, timeout=timeout)
+
+    return shell
 
 
 def select_next_task(tasks: List[Task]) -> Optional[Task]:
@@ -257,6 +282,8 @@ class JobManager:
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self.settings = settings or Settings.from_env()
+        # durable event log (I3): survives the process, folds to RunState
+        self.store = SqliteStore(self.settings.jobs_dir / "events.db")
         self._jobs: Dict[str, JobState] = {}
         self._threads: Dict[str, threading.Thread] = {}
         self._log_queues: Dict[str, "queue.Queue[Optional[str]]"] = {}
@@ -344,10 +371,12 @@ class JobManager:
         backend = get_backend(spec.backend, self.settings)
         tasks = list(spec.tasks)
 
-        # sandbox: model-influenced commands (success_criteria) run in the
-        # selected runtime; "host" (default) is the pre-runtime behavior.
-        runtime = get_runtime(
+        # ONE working tree per job (I1): guards, validators, and the
+        # agent's tools all flow through this Workspace. "Sandboxed" is a
+        # property of the tree, not a bolt-on.
+        tree = _make_tree(
             spec.runtime or self.settings.runtime,
+            workspace.path,
             network=self.settings.sandbox_network,
         )
         max_parallel = max(1, self.settings.max_parallel)
@@ -371,7 +400,7 @@ class JobManager:
             validators = build_validators(
                 task,
                 self.settings.inference_timeout_s,
-                shell_fn=runtime.shell,
+                shell_fn=_tree_shell(tree),
             )
             consistency_judge = _make_consistency_judge(task, self.settings)
             results = run_task(
@@ -385,10 +414,21 @@ class JobManager:
                 timeout=self.settings.inference_timeout_s,
                 strict_scope=self.settings.strict_scope,
                 deadline=job_deadline,
-                runtime=runtime,
+                tree=tree,
                 on_line=on_line,
             )
             passed = bool(results) and results[-1].done
+            for r in results:
+                self.store.append(
+                    state.job_id,
+                    "iteration",
+                    {
+                        "task": task.name,
+                        "n": r.iteration,
+                        "passed": r.passed,
+                        "commit": r.commit,
+                    },
+                )
             with state_lock:
                 state.commits.extend(r.commit for r in results)
                 if passed:
@@ -399,9 +439,21 @@ class JobManager:
             # status writeback after every transition — crash-safe resume
             if tasks_path is not None:
                 write_tasks(tasks_path, tasks)
+            self.store.append(
+                state.job_id,
+                "task_status",
+                {"task": task.name, "status": task.status.value},
+            )
+            # checkpoint the fold: long runs resume snapshot-bounded
+            folded, _ = self.store.load(state.job_id)
+            self.store.save_snapshot(state.job_id, folded)
 
-        runtime.setup(state.job_id, workspace.path)
-        backend.use_runtime(runtime)  # model bash runs in the same sandbox
+        self.store.append(
+            state.job_id, "run_created", {"tasks": [t.name for t in tasks]}
+        )
+        self.store.append(state.job_id, "run_started", {})
+        tree.setup(state.job_id)
+        backend.use_workspace(tree)  # model tools run on the same tree
         try:
             run_parallel(
                 tasks,
@@ -417,17 +469,28 @@ class JobManager:
                 if failed
                 else "tasks blocked by dependencies"
             )
+            self.store.append(
+                state.job_id,
+                "run_finished",
+                {"status": "failed", "error": state.error},
+            )
             return
         finally:
-            runtime.teardown()
+            tree.teardown()
 
         if any(t.status == TaskStatus.FAILED for t in tasks):
             failed = [t.name for t in tasks if t.status == TaskStatus.FAILED]
             state.status = JobStatus.FAILED
             state.error = f"task '{failed[0]}' did not pass"
+            self.store.append(
+                state.job_id,
+                "run_finished",
+                {"status": "failed", "error": state.error},
+            )
             return
 
         state.current_task = None
         workspace.teardown(push_remote=bool(spec.git_remote))
         state.commits = log(workspace.path, count=len(state.commits) + 5)
         state.status = JobStatus.COMPLETED
+        self.store.append(state.job_id, "run_finished", {"status": "completed"})
