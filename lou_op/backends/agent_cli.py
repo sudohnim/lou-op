@@ -10,10 +10,13 @@ from __future__ import annotations
 import json
 
 from ..exec import run_streaming
+from ..logutil import get_logger
 from ..models import IterationContext, IterationOutput
 from ..protocol import has_done_sentinel
 from .base import Backend
 from .providers import Provider
+
+log = get_logger()
 
 
 def _parse_result(stdout: str) -> tuple[bool, str]:
@@ -69,12 +72,14 @@ class AgentCLIBackend(Backend):
 
     def run_iteration(self, ctx: IterationContext) -> IterationOutput:
         cmd = self.provider.build_command(ctx.prompt, str(ctx.repo_path))
+        # stream the delegated CLI's output through structlog so it reaches
+        # the live log stream with the bound job/task context
         result = run_streaming(
             cmd,
             ctx.repo_path,
             total_timeout=self.total_timeout,
             silence_timeout=self.silence_timeout,
-            on_line=ctx.on_line,
+            on_line=lambda line: log.info(line.rstrip("\n"), phase="agent"),
         )
         if result.timed_out:
             raise TimeoutError(f"agent CLI '{self.provider.name}' watchdog timeout")

@@ -25,8 +25,7 @@ class Backend(ABC):
     raw_api: bool = False
 
     @abstractmethod
-    def run_iteration(self, ctx: IterationContext) -> IterationOutput:
-        ...
+    def run_iteration(self, ctx: IterationContext) -> IterationOutput: ...
 
     def use_workspace(self, tree) -> None:
         """Adopt the job's Workspace (the ONE working tree, I1).

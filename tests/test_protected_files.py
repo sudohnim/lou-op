@@ -4,11 +4,21 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from structlog.testing import capture_logs
+
 from lou_op.backends.base import Backend
 from lou_op.loop import run_task
 from lou_op.models import IterationContext, IterationOutput, Task, ValidationResult
 
 SPEC = "def test_truth():\n    assert True\n"
+
+
+def _events(caplogs) -> str:
+    """Flatten captured structlog events + their fields into one string."""
+    return " ".join(
+        str(e.get("event", "")) + " " + " ".join(f"{k}={v}" for k, v in e.items())
+        for e in caplogs
+    )
 
 
 class _TamperingBackend(Backend):
@@ -47,18 +57,17 @@ def test_tampered_protected_file_is_restored_before_validation(repo: Path) -> No
         protected_files=["tests_spec.py"],
         max_iterations=2,
     )
-    lines: list[str] = []
-    results = run_task(
-        repo,
-        task,
-        _TamperingBackend(),
-        validators=[_SpecIntactValidator()],
-        on_line=lines.append,
-    )
+    with capture_logs() as caplogs:
+        results = run_task(
+            repo,
+            task,
+            _TamperingBackend(),
+            validators=[_SpecIntactValidator()],
+        )
     # validator saw the restored spec, so the iteration passes
     assert results[-1].passed is True
     assert (repo / "tests_spec.py").read_text(encoding="utf-8") == SPEC
-    assert any("restoring protected file" in line for line in lines)
+    assert "restoring protected file" in _events(caplogs)
 
 
 def test_deleted_protected_file_is_recreated(repo: Path) -> None:
@@ -94,18 +103,17 @@ class _ExplodingBackend(Backend):
 
 def test_vacuous_spec_skips_model(repo: Path) -> None:
     """Validators green before any work → guard fires, zero model calls."""
-    lines: list[str] = []
-    results = run_task(
-        repo,
-        Task(name="vacuous", max_iterations=3),
-        _ExplodingBackend(),
-        validators=[_AlwaysPassValidator()],
-        on_line=lines.append,
-    )
+    with capture_logs() as caplogs:
+        results = run_task(
+            repo,
+            Task(name="vacuous", max_iterations=3),
+            _ExplodingBackend(),
+            validators=[_AlwaysPassValidator()],
+        )
     assert len(results) == 1
     assert results[0].iteration == 0
     assert results[0].passed is True
-    assert any("vacuous" in line for line in lines)
+    assert "vacuous" in _events(caplogs)
 
 
 class _OutOfScopeBackend(Backend):
@@ -131,18 +139,18 @@ class _ImplExistsValidator:
 
 
 def test_out_of_scope_changes_reverted(repo: Path) -> None:
-    lines: list[str] = []
     task = Task(name="scoped", allowed_paths=["impl.py"], max_iterations=1)
-    results = run_task(
-        repo,
-        task,
-        _OutOfScopeBackend(),
-        validators=[_ImplExistsValidator()],
-        on_line=lines.append,
-    )
+    with capture_logs() as caplogs:
+        results = run_task(
+            repo,
+            task,
+            _OutOfScopeBackend(),
+            validators=[_ImplExistsValidator()],
+        )
     assert (repo / "impl.py").exists()
     assert not (repo / "sneaky.py").exists()
-    assert any("out-of-scope" in line and "sneaky.py" in line for line in lines)
+    events = _events(caplogs)
+    assert "out-of-scope" in events and "sneaky.py" in events
     assert results[-1].passed is True
 
 

@@ -10,9 +10,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 from .git_ops import log
+from .logutil import configure_logging
 from .models import JobSpec, JobState, Task
 from .orchestrator import JobManager
 
+configure_logging()
 app = FastAPI(title="lou-op", version="0.1.0")
 _manager = JobManager()
 

@@ -53,21 +53,30 @@ def test_materialize_writes_and_freezes_specs(tmp_path: Path) -> None:
     # spec written to disk
     assert (tmp_path / "tests/test_slug.py").exists()
     task = tasks[0]
-    # frozen: the test is protected and NOT in the writable scope
+    # frozen: the test is protected (content restored every iteration)
     assert task.protected_files == ["tests/test_slug.py"]
-    assert task.allowed_paths == ["slug.py"]
-    assert "tests/test_slug.py" not in task.allowed_paths
+    # impl file is writable
+    assert "slug.py" in task.allowed_paths
+    # spec IS in allowed_paths so the guard doesn't delete/recreate it each
+    # iteration — integrity comes from protected_files, not scope exclusion
+    assert "tests/test_slug.py" in task.allowed_paths
+    # shared scaffolding (deps) is writable too
+    assert "package.json" in task.allowed_paths
 
 
-def test_impl_cannot_be_in_scope_with_spec(tmp_path: Path) -> None:
-    """The implementer's scope must never include its own exam."""
+def test_spec_stays_protected_even_though_in_scope(tmp_path: Path) -> None:
+    """The exam is protected by content-restoration, not by scope exclusion:
+    every spec file in allowed_paths must also be in protected_files."""
     tasks = build_tasks_from_prd("Build a slugifier.", tmp_path, _fake_generate)
     for task in tasks:
-        assert not set(task.protected_files) & set(task.allowed_paths)
+        for spec in task.protected_files:
+            assert spec in task.allowed_paths  # in scope (no churn)
+        # ...but protected, so _restore_protected rewrites it every iteration
+        assert task.protected_files
 
 
 def test_success_criteria_defaulted_when_absent(tmp_path: Path) -> None:
     spec = dict(_MODEL_JSON["tasks"][0])
     del spec["success_criteria"]
     tasks = materialize_specs([spec], tmp_path)
-    assert tasks[0].success_criteria == ["python -m pytest tests/test_slug.py -q"]
+    assert tasks[0].success_criteria == ["npx vitest run tests/test_slug.py"]

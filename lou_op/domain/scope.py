@@ -108,4 +108,3 @@ class Scope:
                 tree.restore_paths([rel])
                 reverted.append(rel)
         return reverted
-

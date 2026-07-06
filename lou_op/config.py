@@ -13,14 +13,36 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Load .env from cwd or nearest parent directory.
-# override=False means real env vars always win over .env values.
-load_dotenv(override=False)
+_TOOL_ENV = Path(__file__).resolve().parent.parent / ".env"
 
-# 2. Tool-global defaults (only fills in variables not already set)
-_tool_env = Path(__file__).resolve().parent.parent / ".env"
-if _tool_env.exists():
-    load_dotenv(_tool_env, override=False)
+
+def load_project_env(project_dir: "Path | None" = None) -> None:
+    """Populate os.environ from .env files, precedence highest → lowest:
+
+        real shell env  >  <project_dir>/.env  >  ./ .env  >  tool-global .env
+
+    Every load uses ``override=False``, and the *destination* project loads
+    *before* the tool-global one — so a key in the project you're running
+    (``lou-op run ~/proj/PRD.md`` → ``~/proj/.env``) wins over lou-op's own
+    ``.env``, while a real shell variable still beats them all.
+
+    Call once at the CLI/API entry, before ``Settings.from_env()``.
+    """
+    seen: set = set()
+    candidates = []
+    if project_dir is not None:
+        candidates.append(Path(project_dir) / ".env")
+    candidates.append(Path.cwd() / ".env")
+    candidates.append(_TOOL_ENV)
+    for env_file in candidates:
+        try:
+            resolved = env_file.resolve()
+        except OSError:
+            continue
+        if resolved in seen or not env_file.exists():
+            continue
+        seen.add(resolved)
+        load_dotenv(env_file, override=False)
 
 
 def _env(name: str, default: str) -> str:

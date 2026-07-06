@@ -13,18 +13,20 @@ never needs network access and the repo never leaves the machine.
 
 from __future__ import annotations
 
-from datetime import datetime
 import json
 import time
 from typing import Any, Callable, Dict, List, Optional
 
 from ..adapters.workspace_host import HostWorkspace
 from ..audit import AuditLog
+from ..logutil import get_logger
 from ..ports.provider import Provider
 from ..models import IterationContext, IterationOutput
 from ..ports.workspace import Workspace, WorkspaceError
 from ..protocol import DONE_SENTINEL, has_done_sentinel
 from .base import Backend
+
+log = get_logger()
 
 # Tool results are truncated so a chatty command can't blow the context.
 _MAX_TOOL_RESULT_CHARS = 20_000
@@ -270,8 +272,7 @@ class NativeAgentBackend(Backend):
         tree = self._tree or HostWorkspace(ctx.repo_path)
         if self.mode == "text":
             return self._run_text_iteration(ctx, tree)
-        emit = ctx.on_line or (lambda _: None)
-        log = AuditLog(ctx.repo_path)
+        audit = AuditLog(ctx.repo_path)
         messages: List[Dict[str, Any]] = [
             {"role": "system", "content": _SYSTEM_PROMPT},
             {"role": "user", "content": ctx.prompt},
@@ -287,12 +288,15 @@ class NativeAgentBackend(Backend):
                     f"native agent wall timeout ({self.wall_timeout_s}s)"
                 )
             if self._over_budget():
-                emit(
-                    "[native] budget exhausted"
-                    f" (tokens {self.tokens_used}/{self.max_job_tokens or '∞'},"
-                    f" ${self.cost_usd:.2f}/{self.max_cost_usd or '∞'}) — aborting"
+                log.warning(
+                    "budget exhausted — aborting",
+                    phase="native",
+                    tokens=self.tokens_used,
+                    token_cap=self.max_job_tokens or None,
+                    cost_usd=round(self.cost_usd, 2),
+                    cost_cap_usd=self.max_cost_usd or None,
                 )
-                log.record(
+                audit.record(
                     "budget_exceeded",
                     {
                         "tokens_used": self.tokens_used,
@@ -309,17 +313,16 @@ class NativeAgentBackend(Backend):
                     ),
                     log="",
                 )
-            ts = datetime.now().strftime('%H:%M:%S')
-            emit(f"[{ts}] [native] turn {turn}: calling {self.model_id} ...")
+            log.info("calling model", phase="native", turn=turn, model=self.model_id)
             msg = self._chat_fn(messages, _TOOLS)
             text = msg.get("content") or ""
             tool_calls = msg.get("tool_calls") or []
 
             if not tool_calls:
-                emit(f"[native] final text ({len(text)} chars)")
+                log.info("final text", phase="native", chars=len(text))
                 done = has_done_sentinel(text)
                 summary = "; ".join(transcript[-10:]) or text[:500]
-                log.record("usage", {"tokens_total": self.tokens_used})
+                audit.record("usage", {"tokens_total": self.tokens_used})
                 return IterationOutput(done=done, summary=summary, log=text)
 
             # Assistant message must be echoed back verbatim for the endpoint
@@ -339,17 +342,22 @@ class NativeAgentBackend(Backend):
                 if signature == last_tool_signature:
                     repeat_count += 1
                     if repeat_count >= 3:
-                        emit(f"[native] repetition detected (3x same call) — injecting hint")
-                        messages.append({
-                            "role": "user",
-                            "content": (
-                                "You've run the same command 3 times. It's not working. "
-                                "Try a completely different approach. If you're searching for "
-                                "a binary, check if it's already installed via `which node` "
-                                "or `command -v node`. If tests are failing, read the actual "
-                                "error output carefully before retrying."
-                            ),
-                        })
+                        log.info(
+                            "repetition detected (3x same call) —" " injecting hint",
+                            phase="native",
+                        )
+                        messages.append(
+                            {
+                                "role": "user",
+                                "content": (
+                                    "You've run the same command 3 times. It's not working. "
+                                    "Try a completely different approach. If you're searching for "
+                                    "a binary, check if it's already installed via `which node` "
+                                    "or `command -v node`. If tests are failing, read the actual "
+                                    "error output carefully before retrying."
+                                ),
+                            }
+                        )
                         repeat_count = 0
                         last_tool_signature = ""
                         continue
@@ -357,13 +365,12 @@ class NativeAgentBackend(Backend):
                     repeat_count = 0
                     last_tool_signature = signature
 
-                ts = datetime.now().strftime('%H:%M:%S')
-                emit(f"[{ts}] [native] tool: {name}({_preview_args(args)})")
-                log.record("tool_call", {"name": name, **args})
+                log.info("tool", phase="native", tool=name, args=_preview_args(args))
+                audit.record("tool_call", {"name": name, **args})
                 result = execute_tool(tree, name, args)
                 # empty result (e.g. read of an empty file) has no lines
                 first_line = result.splitlines()[0] if result else ""
-                log.record("tool_result", {"name": name, "result": first_line})
+                audit.record("tool_result", {"name": name, "result": first_line})
                 transcript.append(f"{name}: {first_line[:120]}")
                 messages.append(
                     {
@@ -373,8 +380,12 @@ class NativeAgentBackend(Backend):
                     }
                 )
 
-        emit(f"[native] max turns ({self.max_turns}) reached without done signal")
-        log.record("usage", {"tokens_total": self.tokens_used})
+        log.warning(
+            "max turns reached without done signal",
+            phase="native",
+            max_turns=self.max_turns,
+        )
+        audit.record("usage", {"tokens_total": self.tokens_used})
         return IterationOutput(
             done=False,
             summary="; ".join(transcript[-10:]) or "max turns reached",
@@ -390,9 +401,8 @@ class NativeAgentBackend(Backend):
         the jail and locus for free."""
         from ..protocol import parse_files, parse_scratchpad
 
-        emit = ctx.on_line or (lambda _: None)
-        log = AuditLog(ctx.repo_path)
-        emit(f"[native:text] calling {self.model_id} ...")
+        audit = AuditLog(ctx.repo_path)
+        log.info("calling model", phase="native:text", model=self.model_id)
         msg = self._chat_fn([{"role": "user", "content": ctx.prompt}], [])
         text = msg.get("content") or ""
         if self._extractor is not None:
@@ -401,9 +411,9 @@ class NativeAgentBackend(Backend):
         written: List[str] = []
         for file in files:
             tree.write(file.path, file.content)
-            log.record("tool_call", {"name": "write_file", "path": file.path})
+            audit.record("tool_call", {"name": "write_file", "path": file.path})
             written.append(file.path)
-        emit(f"[native:text] wrote {len(written)} file(s): {written}")
+        log.info("wrote files", phase="native:text", count=len(written), files=written)
         done = has_done_sentinel(text)
         if done and not written:
             src = [
@@ -414,9 +424,12 @@ class NativeAgentBackend(Backend):
                 and ".lou-op" not in str(p)
             ]
             if not src:
-                emit("[native:text] done claimed but repo empty — continuing")
+                log.info(
+                    "done claimed but repo empty — continuing",
+                    phase="native:text",
+                )
                 done = False
-        log.record("usage", {"tokens_total": self.tokens_used})
+        audit.record("usage", {"tokens_total": self.tokens_used})
         summary = f"Wrote: {', '.join(written)}" if written else text[:500]
         return IterationOutput(
             done=done,

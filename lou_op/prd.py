@@ -18,7 +18,10 @@ from pathlib import Path
 
 from typing import Callable, List, Optional
 
+from .logutil import get_logger
 from .models import Task
+
+log = get_logger()
 
 GenerateFn = Callable[[str], str]
 
@@ -214,8 +217,12 @@ def build_tasks_from_prd(
     # Try to load cached tasks first
     cached = load_cached_tasks(repo_path)
     if cached is not None:
-        print(f"[prd] reusing cached task graph ({len(cached)} tasks)")
-        print(f"[prd] delete .lou-op/tasks.json to force re-decomposition")
+        log.info(
+            "reusing cached task graph",
+            phase="prd",
+            tasks=len(cached),
+            hint="delete .lou-op/tasks.json to force re-decomposition",
+        )
         return cached
 
     # Fresh decomposition

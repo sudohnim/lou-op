@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -100,7 +100,6 @@ class IterationContext:
     prompt: str
     iteration: int
     progress: str
-    on_line: Optional[Callable[[str], None]] = field(default=None, repr=False)
 
 
 @dataclass

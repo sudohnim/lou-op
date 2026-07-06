@@ -22,8 +22,9 @@ from .backends.raw_api import OpenRouterClient
 from .backends.registry import get_backend
 from .config import Settings
 from .domain.graph import Node, TaskGraph
-from .git_ops import log
+from .git_ops import log as git_log
 from .judge import ConsistencyJudge
+from .logutil import bind, bound, get_logger, register_queue, unregister_queue
 from .loop import run_task
 from .models import JobSpec, JobState, JobStatus, Task, TaskStatus
 from .adapters.store_sqlite import SqliteStore
@@ -32,6 +33,8 @@ from .adapters.workspace_host import HostWorkspace
 from .ports.workspace import Workspace as TreeWorkspace
 from .validators import build_validators
 from .workspace import GitWorkspace, NullWorkspace, Workspace
+
+log = get_logger()
 
 
 class DependencyError(Exception):
@@ -308,6 +311,9 @@ class JobManager:
         )
         self._jobs[job_id] = state
         self._log_queues[job_id] = queue.Queue()
+        # let the structlog queue-sink route this job's log lines here, so any
+        # thread only has to bind job_id for its output to reach the stream
+        register_queue(job_id, self._log_queues[job_id])
         if run_async:
             thread = threading.Thread(
                 target=self._run,
@@ -344,6 +350,7 @@ class JobManager:
             log_q = self._log_queues.get(state.job_id)
             if log_q is not None:
                 log_q.put(None)  # signal SSE consumer that job is done
+            unregister_queue(state.job_id)
         self._write_metadata(state)
 
     def _write_metadata(self, state: JobState) -> None:
@@ -359,36 +366,30 @@ class JobManager:
         self, state: JobState, spec: JobSpec, tasks_path: Optional[Path]
     ) -> None:
         state.status = JobStatus.RUNNING
-        print(f"[orchestrator] workspace_type={spec.workspace_type!r}", flush=True)
+        # every log line in this job thread carries job_id → the queue-sink
+        # routes it to this job's live stream (CLI drain / SSE)
+        bind(job_id=state.job_id)
+        log.debug("workspace", phase="orchestrator", type=spec.workspace_type)
         workspace = _make_workspace(spec, self.settings)
-        print(f"[orchestrator] setting up workspace...", flush=True)
         workspace.setup(state.job_id, state.git_branch)
-        print(f"[orchestrator] workspace ready at {workspace.path}", flush=True)
+        log.info("workspace ready", phase="orchestrator", path=str(workspace.path))
 
-        log_q = self._log_queues.get(state.job_id)
-
-        def on_line(line: str) -> None:
-            if log_q is not None:
-                log_q.put(line.rstrip("\n"))
-
-        print(f"[orchestrator] creating backend ({spec.backend})...", flush=True)
         backend = get_backend(spec.backend, self.settings)
-        print(f"[orchestrator] backend created", flush=True)
+        log.debug("backend created", phase="orchestrator", backend=spec.backend)
 
         tasks = list(spec.tasks)
 
         # ONE working tree per job (I1): guards, validators, and the
         # agent's tools all flow through this Workspace. "Sandboxed" is a
         # property of the tree, not a bolt-on.
-        print(f"[orchestrator] creating tree (runtime={spec.runtime or self.settings.runtime!r})...", flush=True)
+        runtime_kind = spec.runtime or self.settings.runtime
         tree = _make_tree(
-            spec.runtime or self.settings.runtime,
+            runtime_kind,
             workspace.path,
             network=self.settings.sandbox_network,
         )
-        print(f"[orchestrator] setting up tree...", flush=True)
         tree.setup(state.job_id)
-        print(f"[orchestrator] tree ready", flush=True)
+        log.debug("tree ready", phase="orchestrator", runtime=runtime_kind)
 
         max_parallel = max(1, self.settings.max_parallel)
         if max_parallel > 1 and spec.workspace_type != "null":
@@ -404,50 +405,52 @@ class JobManager:
         job_deadline = time.monotonic() + max(60, spec.timeout_seconds)
 
         backend.use_workspace(tree)  # model tools run on the same tree
-        print(f"[orchestrator] starting task execution ({len(tasks)} tasks)...", flush=True)
+        log.info("starting tasks", phase="orchestrator", count=len(tasks))
 
         def run_one(task: Task) -> bool:
-            if time.monotonic() >= job_deadline:
-                return False  # over the ceiling: fail fast, don't start work
-            with state_lock:
-                state.current_task = task.name
-            validators = build_validators(
-                task,
-                self.settings.inference_timeout_s,
-                shell_fn=_tree_shell(tree),
-            )
-            consistency_judge = _make_consistency_judge(task, self.settings)
-            results = run_task(
-                workspace.path,
-                task,
-                backend,
-                workspace=workspace,
-                validators=validators,
-                consistency_judge=consistency_judge,
-                budget=self.settings.context_budget_tokens,
-                timeout=self.settings.inference_timeout_s,
-                strict_scope=self.settings.strict_scope,
-                deadline=job_deadline,
-                tree=tree,
-                on_line=on_line,
-            )
-            passed = bool(results) and results[-1].done
-            for r in results:
-                self.store.append(
-                    state.job_id,
-                    "iteration",
-                    {
-                        "task": task.name,
-                        "n": r.iteration,
-                        "passed": r.passed,
-                        "commit": r.commit,
-                    },
+            # ThreadPoolExecutor does not copy contextvars into workers, so
+            # re-bind job_id (+ task) here for this worker's log routing
+            with bound(job_id=state.job_id, task=task.name):
+                if time.monotonic() >= job_deadline:
+                    return False  # over the ceiling: fail fast, don't start
+                with state_lock:
+                    state.current_task = task.name
+                validators = build_validators(
+                    task,
+                    self.settings.inference_timeout_s,
+                    shell_fn=_tree_shell(tree),
                 )
-            with state_lock:
-                state.commits.extend(r.commit for r in results)
-                if passed:
-                    state.completed_tasks.append(task.name)
-            return passed
+                consistency_judge = _make_consistency_judge(task, self.settings)
+                results = run_task(
+                    workspace.path,
+                    task,
+                    backend,
+                    workspace=workspace,
+                    validators=validators,
+                    consistency_judge=consistency_judge,
+                    budget=self.settings.context_budget_tokens,
+                    timeout=self.settings.inference_timeout_s,
+                    strict_scope=self.settings.strict_scope,
+                    deadline=job_deadline,
+                    tree=tree,
+                )
+                passed = bool(results) and results[-1].done
+                for r in results:
+                    self.store.append(
+                        state.job_id,
+                        "iteration",
+                        {
+                            "task": task.name,
+                            "n": r.iteration,
+                            "passed": r.passed,
+                            "commit": r.commit,
+                        },
+                    )
+                with state_lock:
+                    state.commits.extend(r.commit for r in results)
+                    if passed:
+                        state.completed_tasks.append(task.name)
+                return passed
 
         def on_status(task: Task) -> None:
             # status writeback after every transition — crash-safe resume
@@ -503,6 +506,6 @@ class JobManager:
 
         state.current_task = None
         workspace.teardown(push_remote=bool(spec.git_remote))
-        state.commits = log(workspace.path, count=len(state.commits) + 5)
+        state.commits = git_log(workspace.path, count=len(state.commits) + 5)
         state.status = JobStatus.COMPLETED
         self.store.append(state.job_id, "run_finished", {"status": "completed"})

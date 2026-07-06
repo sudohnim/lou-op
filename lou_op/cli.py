@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import argparse
 import json
-import queue
 import sys
-import time
 from pathlib import Path
 
 from .backends.registry import get_backend
 from .bench import run_bench
-from .config import Settings
+from .config import Settings, load_project_env
+from .logutil import configure_logging, get_logger
 from .models import JobSpec, Task, TaskStatus
 from .orchestrator import JobManager, load_tasks, write_tasks
+
+log = get_logger()
 
 _DECOMPOSE_PROMPT = """\
 You are a project planner for an automated code-generation loop.
@@ -81,6 +82,7 @@ def _plan(args: argparse.Namespace) -> int:
         print(f"tasks file not found: {tasks_path}", file=sys.stderr)
         return 2
 
+    load_project_env(tasks_path.parent.resolve())
     tasks = load_tasks(tasks_path)
     settings = Settings.from_env()
 
@@ -212,6 +214,10 @@ def _run(args: argparse.Namespace) -> int:
         print(f"tasks file not found: {tasks_path}", file=sys.stderr)
         return 2
 
+    project_path = tasks_path.parent.resolve()
+    # read the .env from the project you're running, not lou-op's own dir
+    load_project_env(project_path)
+
     settings = Settings.from_env()
     if args.jobs_dir:
         settings.jobs_dir = Path(args.jobs_dir)
@@ -223,8 +229,6 @@ def _run(args: argparse.Namespace) -> int:
         settings.max_parallel = args.max_parallel
     if getattr(args, "sandbox_network", False):
         settings.sandbox_network = True
-
-    project_path = tasks_path.parent.resolve()
 
     writeback_path = tasks_path
     if tasks_path.suffix.lower() in (".md", ".markdown"):
@@ -247,35 +251,20 @@ def _run(args: argparse.Namespace) -> int:
 
     manager = JobManager(settings)
 
-    print("[debug] creating job...", flush=True)
+    # run_async=False blocks here; structlog streams the job's progress live
+    # to the console (the per-job queue still feeds the API/SSE consumers)
+    log.debug("creating job", phase="cli")
     try:
         state = manager.create(spec, run_async=False, tasks_path=writeback_path)
-        print(f"[debug] job created: {state.job_id}", flush=True)
+    except KeyboardInterrupt:
+        print("\n[interrupt] stopping...", file=sys.stderr)
+        return 130
     except Exception as exc:
-        print(f"[CRITICAL] JobManager.create() failed: {exc}", file=sys.stderr)
+        log.error("job failed to start", phase="cli", error=str(exc))
         import traceback
+
         traceback.print_exc()
         return 1
-
-    log_q = manager.get_log_queue(state.job_id)
-    if log_q is None:
-        print(f"[ERROR] No log queue for job {state.job_id}", file=sys.stderr)
-        return 1
-
-    print("[debug] entering log drain loop...", flush=True)
-
-    while True:
-        try:
-            line = log_q.get(timeout=10)
-            if line is None:
-                break
-            print(line, flush=True)
-        except queue.Empty:
-            print("[warning] no output for 10s — worker may be deadlocked", file=sys.stderr)
-            continue
-        except KeyboardInterrupt:
-            print("\n[interrupt] stopping...", file=sys.stderr)
-            break
 
     print(f"\njob {state.job_id} [{state.status.value}] branch {state.git_branch}")
     print(f"repo: {project_path}")
@@ -293,10 +282,11 @@ def _bench(args: argparse.Namespace) -> int:
         print(f"tasks file not found: {tasks_path}", file=sys.stderr)
         return 2
 
+    project_path = tasks_path.parent.resolve()
+    load_project_env(project_path)
     tasks = load_tasks(tasks_path)
     settings = Settings.from_env()
 
-    project_path = tasks_path.parent.resolve()
     backend = get_backend(args.backend or settings.default_backend, settings)
 
     report = run_bench(project_path, tasks, backend, runs=args.runs, settings=settings)
@@ -311,6 +301,7 @@ def _ping(args: argparse.Namespace) -> int:
     from .backends.native_agent import NativeAgentBackend
     from .ping import ping
 
+    load_project_env()
     settings = Settings.from_env()
     if args.model:
         settings.model_id = args.model
@@ -336,6 +327,16 @@ def _ping(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lou-op")
+    parser.add_argument(
+        "--log-level",
+        default="",
+        help="debug | info | warning | error (default: info, or LOU_LOG_LEVEL)",
+    )
+    parser.add_argument(
+        "--json-logs",
+        action="store_true",
+        help="emit machine-readable JSON logs instead of console output",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     plan = sub.add_parser("plan", help="decompose tasks.yaml into sub-tasks using LLM")
@@ -401,6 +402,10 @@ def main(argv: list[str] | None = None) -> int:
     ping_p.set_defaults(func=_ping)
 
     args = parser.parse_args(argv)
+    configure_logging(
+        json_logs=args.json_logs or None,
+        level=args.log_level or None,
+    )
     return int(args.func(args))
 
 

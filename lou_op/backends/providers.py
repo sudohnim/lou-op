@@ -15,8 +15,7 @@ class Provider(ABC):
     name: str
 
     @abstractmethod
-    def build_command(self, prompt: str, work_dir: str) -> List[str]:
-        ...
+    def build_command(self, prompt: str, work_dir: str) -> List[str]: ...
 
 
 _CLAUDE_ALLOWED_TOOLS = "Read,Write,Edit,Bash,Glob,Grep,LS"
