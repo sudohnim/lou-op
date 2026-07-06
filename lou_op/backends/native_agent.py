@@ -13,6 +13,7 @@ never needs network access and the repo never leaves the machine.
 
 from __future__ import annotations
 
+from datetime import datetime
 import json
 import time
 from typing import Any, Callable, Dict, List, Optional
@@ -28,7 +29,7 @@ from .base import Backend
 # Tool results are truncated so a chatty command can't blow the context.
 _MAX_TOOL_RESULT_CHARS = 20_000
 _MAX_READ_CHARS = 50_000
-_BASH_TIMEOUT_S = 300
+_BASH_TIMEOUT_S = 120
 
 _SYSTEM_PROMPT = f"""\
 You are an autonomous coding agent working in a git repository.
@@ -276,6 +277,8 @@ class NativeAgentBackend(Backend):
             {"role": "user", "content": ctx.prompt},
         ]
         transcript: List[str] = []
+        last_tool_signature: str = ""
+        repeat_count: int = 0
         deadline = time.monotonic() + self.wall_timeout_s
 
         for turn in range(1, self.max_turns + 1):
@@ -306,7 +309,8 @@ class NativeAgentBackend(Backend):
                     ),
                     log="",
                 )
-            emit(f"[native] turn {turn}: calling {self.model_id} ...")
+            ts = datetime.now().strftime('%H:%M:%S')
+            emit(f"[{ts}] [native] turn {turn}: calling {self.model_id} ...")
             msg = self._chat_fn(messages, _TOOLS)
             text = msg.get("content") or ""
             tool_calls = msg.get("tool_calls") or []
@@ -330,7 +334,31 @@ class NativeAgentBackend(Backend):
                     args = json.loads(fn.get("arguments") or "{}")
                 except json.JSONDecodeError:
                     args = {}
-                emit(f"[native] tool: {name}({_preview_args(args)})")
+                signature = f"{name}:{_preview_args(args)}"
+
+                if signature == last_tool_signature:
+                    repeat_count += 1
+                    if repeat_count >= 3:
+                        emit(f"[native] repetition detected (3x same call) — injecting hint")
+                        messages.append({
+                            "role": "user",
+                            "content": (
+                                "You've run the same command 3 times. It's not working. "
+                                "Try a completely different approach. If you're searching for "
+                                "a binary, check if it's already installed via `which node` "
+                                "or `command -v node`. If tests are failing, read the actual "
+                                "error output carefully before retrying."
+                            ),
+                        })
+                        repeat_count = 0
+                        last_tool_signature = ""
+                        continue
+                else:
+                    repeat_count = 0
+                    last_tool_signature = signature
+
+                ts = datetime.now().strftime('%H:%M:%S')
+                emit(f"[{ts}] [native] tool: {name}({_preview_args(args)})")
                 log.record("tool_call", {"name": name, **args})
                 result = execute_tool(tree, name, args)
                 # empty result (e.g. read of an empty file) has no lines

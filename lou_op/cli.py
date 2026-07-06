@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import sys
+import time
 from pathlib import Path
 
 from .backends.registry import get_backend
@@ -203,6 +205,7 @@ def _tasks_from_prd(prd_path, project_path, settings, args):
 
     return tasks
 
+
 def _run(args: argparse.Namespace) -> int:
     tasks_path = Path(args.tasks)
     if not tasks_path.exists():
@@ -223,14 +226,11 @@ def _run(args: argparse.Namespace) -> int:
 
     project_path = tasks_path.parent.resolve()
 
-    # front door: a markdown PRD is decomposed into a frozen-spec task graph;
-    # a .yaml/.yml tasks file is the escape hatch and loads as before
     writeback_path = tasks_path
     if tasks_path.suffix.lower() in (".md", ".markdown"):
         tasks = _tasks_from_prd(tasks_path, project_path, settings, args)
         if tasks is None:
             return 1
-        # persist status to a generated yaml, never back into the PRD
         writeback_path = project_path / ".lou-op" / "generated_tasks.yaml"
         writeback_path.parent.mkdir(parents=True, exist_ok=True)
         write_tasks(writeback_path, tasks)
@@ -246,16 +246,36 @@ def _run(args: argparse.Namespace) -> int:
     )
 
     manager = JobManager(settings)
-    state = manager.create(spec, run_async=True, tasks_path=writeback_path)
 
-    # drain log queue — prints lines in real time, blocks until job ends
+    print("[debug] creating job...", flush=True)
+    try:
+        state = manager.create(spec, run_async=False, tasks_path=writeback_path)
+        print(f"[debug] job created: {state.job_id}", flush=True)
+    except Exception as exc:
+        print(f"[CRITICAL] JobManager.create() failed: {exc}", file=sys.stderr)
+        import traceback
+        traceback.print_exc()
+        return 1
+
     log_q = manager.get_log_queue(state.job_id)
-    if log_q is not None:
-        while True:
-            line = log_q.get()
+    if log_q is None:
+        print(f"[ERROR] No log queue for job {state.job_id}", file=sys.stderr)
+        return 1
+
+    print("[debug] entering log drain loop...", flush=True)
+
+    while True:
+        try:
+            line = log_q.get(timeout=10)
             if line is None:
                 break
             print(line, flush=True)
+        except queue.Empty:
+            print("[warning] no output for 10s — worker may be deadlocked", file=sys.stderr)
+            continue
+        except KeyboardInterrupt:
+            print("\n[interrupt] stopping...", file=sys.stderr)
+            break
 
     print(f"\njob {state.job_id} [{state.status.value}] branch {state.git_branch}")
     print(f"repo: {project_path}")

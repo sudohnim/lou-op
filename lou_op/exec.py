@@ -9,6 +9,7 @@ used to supervise long-running agent CLIs.
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import threading
 import time
@@ -85,6 +86,7 @@ def run_command(cmd: Sequence[str], cwd: Path, *, timeout: int = 300) -> CmdResu
             capture_output=True,
             text=True,
             timeout=timeout,
+            stdin=subprocess.DEVNULL,
         )
         return CmdResult(proc.returncode, proc.stdout, proc.stderr, False)
     except subprocess.TimeoutExpired as exc:
@@ -102,20 +104,47 @@ def run_shell(
 
     Model-influenced by default (validator criteria, agent bash), so the
     environment is scrubbed of secrets unless an explicit ``env`` is given.
+
+    Uses ``start_new_session=True`` so the shell and ALL its children
+    (including backgrounded processes like ``foo &``) land in a dedicated
+    process group. On timeout the entire group is killed — orphaned
+    background servers can't hold stdout pipes open and hang the parent.
+    ``stdin=DEVNULL`` prevents interactive prompts from blocking forever.
     """
+    proc = subprocess.Popen(
+        command,
+        cwd=str(cwd),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        stdin=subprocess.DEVNULL,
+        text=True,
+        shell=True,
+        env=env if env is not None else scrubbed_env(),
+        start_new_session=True,
+    )
     try:
-        proc = subprocess.run(
-            command,
-            cwd=str(cwd),
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            shell=True,
-            env=env if env is not None else scrubbed_env(),
-        )
-        return CmdResult(proc.returncode, proc.stdout, proc.stderr, False)
-    except subprocess.TimeoutExpired as exc:
-        return CmdResult(-1, _to_str(exc.stdout), _to_str(exc.stderr), True)
+        stdout, stderr = proc.communicate(timeout=timeout)
+        return CmdResult(proc.returncode, stdout, stderr, False)
+    except subprocess.TimeoutExpired:
+        # Kill the entire process group — catches backgrounded children
+        # (e.g. ``npx vite preview &``) that outlive the parent shell
+        # and keep stdout pipes open, preventing communicate() from
+        # returning.
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        try:
+            stdout, stderr = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            # SIGTERM didn't work — escalate to SIGKILL
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            proc.wait()
+            stdout, stderr = proc.communicate()
+        return CmdResult(-1, _to_str(stdout), _to_str(stderr), True)
 
 
 def run_streaming(
@@ -137,9 +166,11 @@ def run_streaming(
         cwd=str(cwd),
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL,
         text=True,
         bufsize=1,
         env=env if env is not None else scrubbed_env(),
+        start_new_session=True,
     )
     lines: List[str] = []
     start = time.monotonic()
@@ -154,7 +185,10 @@ def run_streaming(
                 now - last_output[0] > silence_timeout
             ):
                 timed_out[0] = True
-                proc.kill()
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 return
 
     watcher = threading.Thread(target=watchdog, daemon=True)

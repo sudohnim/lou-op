@@ -76,26 +76,21 @@ def run_task(
     tree: Optional[TreeWorkspace] = None,
     on_line: Optional[Callable[[str], None]] = None,
 ) -> List[IterationResult]:
-    """Iterate on ``task`` until it passes, signals done, or hits the cap.
-
-    ``deadline`` is a time.monotonic() timestamp — the job's wall-clock
-    ceiling. Checked at every iteration boundary; breach stops the task
-    cleanly (statuses already persisted by the caller's writeback).
-
-    ``tree`` is the Workspace port owning the working tree (I1): guards,
-    validator exec and the agent's tools all operate on this one tree.
-    Defaults to a HostWorkspace over ``repo_path``.
-    """
+    """Iterate on ``task`` until it passes, signals done, or hits the cap."""
     emit = on_line or (lambda _: None)
+    print(f"[loop] run_task START: {task.name}", flush=True)
     if tree is None:
         tree = HostWorkspace(repo_path)
     checks = validators if validators is not None else build_validators(task, timeout)
+    print(f"[loop] validators built ({len(checks)})", flush=True)
     results: List[IterationResult] = []
     last_validation: List[ValidationResult] = []
     last_wrote_files: bool = True  # assume first iteration will be productive
-    last_claimed_done: bool = False  # whether the model signalled done last iteration
+    last_claimed_done: bool = False
     work_path = workspace.path if workspace is not None else repo_path
     protected = _snapshot_protected(work_path, task.protected_files)
+    print(f"[loop] protected snapshot done ({len(protected)} files)", flush=True)
+
     # scope policy is a domain object: strict + nothing inferable fails
     # CLOSED there (EmptyScopeError), never unlimited by accident
     try:
@@ -116,12 +111,15 @@ def run_task(
             )
         ]
 
+    print(f"[loop] running preflight ({len(checks)} checks)...", flush=True)
     # Anti-gaming pre-flight: a healthy spec is red before any work. If the
     # validators already pass, either the task is done (resume) or the spec is
     # vacuous — either way, don't burn model iterations on it.
     if checks:
         preflight = [check.run(work_path) for check in checks]
-        if all(v.passed for v in preflight):
+        preflight_passed = all(v.passed for v in preflight)
+        print(f"[loop] preflight done (all_passed={preflight_passed})", flush=True)
+        if preflight_passed:
             emit(
                 "[guard] validators pass before any work — task already done"
                 " or spec is vacuous; skipping model"
@@ -145,9 +143,6 @@ def run_task(
             break
 
         # B — no-op short circuit
-        # If nothing was written AND tests still failing AND model didn't claim done:
-        # true no-op — stop immediately, no point continuing
-        # If nothing written AND model claimed done: model is wrong — warn, continue
         if iteration > 1 and not last_wrote_files:
             if not last_claimed_done:
                 emit(
@@ -155,7 +150,6 @@ def run_task(
                     " — stopping (manual intervention needed)"
                 )
                 break
-            # else: model claimed done but tests fail — inject a correction below
 
         # judge: consistency check before each iteration (skip first — no history yet)
         if iteration > 1 and consistency_judge is not None:
@@ -170,6 +164,7 @@ def run_task(
             if iteration > 1 and not last_wrote_files and last_claimed_done
             else ""
         )
+        print(f"[loop] iter {iteration} — rendering state...", flush=True)
         state = render_state(
             work_path,
             task,
@@ -178,6 +173,7 @@ def run_task(
             budget=budget,
             include_code=backend.include_code,
         )
+        print(f"[loop] iter {iteration} — building prompt...", flush=True)
         prompt = build_prompt(task, state, raw_api=backend.raw_api)
         ctx = IterationContext(
             repo_path=work_path,
@@ -188,25 +184,23 @@ def run_task(
             on_line=on_line,
         )
 
+        print(f"[loop] iter {iteration} — calling backend.run_iteration...", flush=True)
         output = retry_with_backoff(lambda: backend.run_iteration(ctx))
+        print(f"[loop] iter {iteration} — backend returned", flush=True)
         last_claimed_done = output.done
 
-        # guards run before anything is measured or validated:
-        # out-of-scope changes are reverted, tampered spec files restored.
-        # One tree (I1): the same Workspace the validators and agent use,
-        # so remote loci can never grade a different state than the guards
-        # produced — transfer, if any, is internal to tree.exec.
         scope_policy.enforce(tree, emit)
         _restore_protected(tree, protected, emit)
 
-        # "wrote files" now means work that *survived* the guards
         last_wrote_files = bool(tree.changed_paths())
+        print(f"[loop] iter {iteration} — wrote_files={last_wrote_files}", flush=True)
 
         last_validation = [check.run(work_path) for check in checks]
         passed = all(v.passed for v in last_validation)
-        done = passed  # model's done signal is advisory; validators are the gate
+        done = passed
 
-        # Write progress.md — prefer model's scratchpad, else loop-generated entry
+        print(f"[loop] iter {iteration} — passed={passed}, done={done}", flush=True)
+
         if output.scratchpad:
             write_scratchpad(work_path, output.scratchpad)
         else:

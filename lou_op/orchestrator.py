@@ -359,8 +359,11 @@ class JobManager:
         self, state: JobState, spec: JobSpec, tasks_path: Optional[Path]
     ) -> None:
         state.status = JobStatus.RUNNING
+        print(f"[orchestrator] workspace_type={spec.workspace_type!r}", flush=True)
         workspace = _make_workspace(spec, self.settings)
+        print(f"[orchestrator] setting up workspace...", flush=True)
         workspace.setup(state.job_id, state.git_branch)
+        print(f"[orchestrator] workspace ready at {workspace.path}", flush=True)
 
         log_q = self._log_queues.get(state.job_id)
 
@@ -368,17 +371,25 @@ class JobManager:
             if log_q is not None:
                 log_q.put(line.rstrip("\n"))
 
+        print(f"[orchestrator] creating backend ({spec.backend})...", flush=True)
         backend = get_backend(spec.backend, self.settings)
+        print(f"[orchestrator] backend created", flush=True)
+
         tasks = list(spec.tasks)
 
         # ONE working tree per job (I1): guards, validators, and the
         # agent's tools all flow through this Workspace. "Sandboxed" is a
         # property of the tree, not a bolt-on.
+        print(f"[orchestrator] creating tree (runtime={spec.runtime or self.settings.runtime!r})...", flush=True)
         tree = _make_tree(
             spec.runtime or self.settings.runtime,
             workspace.path,
             network=self.settings.sandbox_network,
         )
+        print(f"[orchestrator] setting up tree...", flush=True)
+        tree.setup(state.job_id)
+        print(f"[orchestrator] tree ready", flush=True)
+
         max_parallel = max(1, self.settings.max_parallel)
         if max_parallel > 1 and spec.workspace_type != "null":
             # one git working tree cannot host concurrent index operations;
@@ -391,6 +402,9 @@ class JobManager:
         state_lock = threading.Lock()
         # job wall-clock ceiling (JobSpec.timeout_seconds, default 2h)
         job_deadline = time.monotonic() + max(60, spec.timeout_seconds)
+
+        backend.use_workspace(tree)  # model tools run on the same tree
+        print(f"[orchestrator] starting task execution ({len(tasks)} tasks)...", flush=True)
 
         def run_one(task: Task) -> bool:
             if time.monotonic() >= job_deadline:
@@ -452,8 +466,6 @@ class JobManager:
             state.job_id, "run_created", {"tasks": [t.name for t in tasks]}
         )
         self.store.append(state.job_id, "run_started", {})
-        tree.setup(state.job_id)
-        backend.use_workspace(tree)  # model tools run on the same tree
         try:
             run_parallel(
                 tasks,
