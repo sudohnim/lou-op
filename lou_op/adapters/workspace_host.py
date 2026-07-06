@@ -27,8 +27,6 @@ class HostWorkspace(Workspace):
     def __init__(self, root: Path) -> None:
         self.root = Path(root)
 
-    # -- execution ----------------------------------------------------------
-
     def exec(
         self,
         command: str,
@@ -39,15 +37,17 @@ class HostWorkspace(Workspace):
         budget = float(timeout)
         if deadline is not None:
             budget = max(0.0, min(budget, deadline - time.monotonic()))
+
         proc = subprocess.Popen(
             command,
             shell=True,
             cwd=self.root,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,  # ← Prevents interactive prompts
             text=True,
             env=scrubbed_env(),
-            start_new_session=True,  # own process group → killable as a unit
+            start_new_session=True,  # ← Own process group → killable as a unit
         )
         try:
             out, err = proc.communicate(timeout=budget)
@@ -59,10 +59,10 @@ class HostWorkspace(Workspace):
                 os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 proc.kill()
+
+            # Wait for all descendants to die and collect output
             out, err = proc.communicate()
             return ExecResult(-9, out or "", err or "", timed_out=True, killed=True)
-
-    # -- version control ----------------------------------------------------
 
     def changed_paths(self) -> List[Changed]:
         res = _git(self.root, "status", "-z", "--porcelain")

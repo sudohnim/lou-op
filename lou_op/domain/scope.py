@@ -21,12 +21,32 @@ class EmptyScopeError(Exception):
     unbounded (fail closed)."""
 
 
+# Ephemeral / non-source paths the guard should never touch.
+# These are either loop-internal state or build artifacts that
+# the model's tools legitimately produce as side effects.
+_EPHEMERAL_PREFIXES: tuple = (
+    ".lou-op/",
+    ".lou-op-jobs/",
+    "node_modules/",
+    ".vite/",
+    ".vitest/",
+    "dist/",
+    "coverage/",
+    "__pycache__/",
+    "test-results/",
+    ".wrangler/",
+    ".dev.vars",
+    "playwright-report/",
+    "playwright/.cache/",
+)
+
+
 @dataclass
 class Scope:
     allowed: List[str] = field(default_factory=list)
     protected: List[str] = field(default_factory=list)
-    #: paths exempt from enforcement (loop bookkeeping)
-    exempt_prefixes: tuple = (".lou-op/",)
+    #: paths exempt from enforcement (loop bookkeeping + ephemeral artifacts)
+    exempt_prefixes: tuple = _EPHEMERAL_PREFIXES
 
     @classmethod
     def from_task(
@@ -88,3 +108,4 @@ class Scope:
                 tree.restore_paths([rel])
                 reverted.append(rel)
         return reverted
+

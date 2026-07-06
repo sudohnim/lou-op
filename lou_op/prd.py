@@ -74,6 +74,11 @@ PRD:
 {prd}
 """
 
+# Shared project files that any task may legitimately need to modify
+# (dependency manifests, lock files). Added to every task's allowed_paths
+# so the guard doesn't revert `npm install` / `npm ci` side effects.
+_SHARED_FILES = ["package.json", "package-lock.json"]
+
 
 def _strip_fences(text: str) -> str:
     text = text.strip()
@@ -82,6 +87,25 @@ def _strip_fences(text: str) -> str:
         end = len(lines) - 1 if lines[-1].strip() == "```" else len(lines)
         text = "\n".join(lines[1:end])
     return text.strip()
+
+
+def _build_allowed_paths(impl_paths: List[str], spec_path: str) -> List[str]:
+    """Construct the full allowed_paths list for a task.
+
+    Includes:
+    - The task's impl_paths (source files the model writes)
+    - The spec test file path (so the guard doesn't delete+recreate it
+      every iteration; _restore_protected still enforces content integrity)
+    - Shared project files (package.json, package-lock.json) so the model
+      can add dependencies without the guard reverting them
+    """
+    paths = list(impl_paths)
+    if spec_path not in paths:
+        paths.append(spec_path)
+    for shared in _SHARED_FILES:
+        if shared not in paths:
+            paths.append(shared)
+    return paths
 
 
 def load_cached_tasks(repo_path: Path) -> Optional[List[Task]]:
@@ -116,7 +140,9 @@ def load_cached_tasks(repo_path: Path) -> Optional[List[Task]]:
                 success_criteria=spec.get("success_criteria")
                 or [f"npx vitest run {spec_path}"],
                 protected_files=[spec_path],
-                allowed_paths=list(spec.get("impl_paths", [])),
+                allowed_paths=_build_allowed_paths(
+                    list(spec.get("impl_paths", [])), spec_path
+                ),
                 depends_on=spec.get("depends_on", []),
                 max_iterations=spec.get("max_iterations", 6),
             )
@@ -165,9 +191,10 @@ def materialize_specs(specs: List[dict], repo_path: Path) -> List[Task]:
                 description=spec.get("description", ""),
                 success_criteria=spec.get("success_criteria")
                 or [f"npx vitest run {spec_path}"],
-                # the exam is frozen: restored every iteration, never in scope
+                # the exam is frozen: restored every iteration, never truly
+                # editable by the model (protected_files enforces content)
                 protected_files=[spec_path],
-                allowed_paths=impl_paths,
+                allowed_paths=_build_allowed_paths(impl_paths, spec_path),
                 depends_on=spec.get("depends_on", []),
                 max_iterations=spec.get("max_iterations", 6),
             )
