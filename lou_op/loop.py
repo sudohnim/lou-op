@@ -359,6 +359,10 @@ def _run_iteration(
     if output.scratchpad:
         write_scratchpad(work_path, output.scratchpad)
     else:
+        # Accumulated history: what the model did each iteration + a one-line
+        # PASS/FAIL trend. The full failure output is NOT echoed here — it is
+        # already fed to the model verbatim by render_state's "Last Validation
+        # Output" section, so duplicating it into progress.md was dead weight.
         existing = read_progress(work_path)
         val_summary = (
             "; ".join(
@@ -367,14 +371,10 @@ def _run_iteration(
             if last_validation
             else "no validators"
         )
-        val_output = "\n".join(
-            f"  {v.output[:300]}" for v in last_validation if not v.passed
-        )
         entry = (
             f"\n## Iteration {iteration} — {_status_tag(passed, done)}\n"
             f"**Files:** {output.summary}\n"
             f"**Validators:** {val_summary}\n"
-            + (f"**Errors:**\n{val_output}\n" if val_output else "")
         )
         write_scratchpad(work_path, trim_progress(existing + entry))
 

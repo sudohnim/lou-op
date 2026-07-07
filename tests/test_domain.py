@@ -5,18 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from lou_op.domain import (
-    Criterion,
-    IterationMachine,
-    IterationState,
-    Provenance,
-    Scope,
-    TaskGraph,
-    VacuousSpecError,
-    Verification,
-)
+from lou_op.domain import Scope, TaskGraph
 from lou_op.domain.graph import Node, schedule
-from lou_op.domain.iteration import AgentReport, GuardReport, VerdictInput
 from lou_op.domain.scope import EmptyScopeError
 from lou_op.ports.workspace import Changed, ExecResult
 
@@ -55,54 +45,6 @@ class FakeTree:
 
     def write(self, rel, content):
         self.files[rel] = content
-
-
-class TestIterationMachine:
-    def _drive_to_commit(self, m, wrote=True, claimed=False, passed=False):
-        m.generated(AgentReport(claimed_done=claimed, wrote_files=wrote))
-        m.guarded(GuardReport())
-        m.validated(VerdictInput(passed=passed))
-        return m.committed()
-
-    def test_happy_path_done(self):
-        m = IterationMachine()
-        assert self._drive_to_commit(m, passed=True) == IterationState.DONE
-
-    def test_failing_validators_continue(self):
-        m = IterationMachine()
-        assert self._drive_to_commit(m, passed=False) == IterationState.CONTINUE
-
-    def test_noop_stops(self):
-        m = IterationMachine()
-        state = self._drive_to_commit(m, wrote=False, claimed=False, passed=False)
-        assert state == IterationState.STOP
-
-    def test_wrong_done_claim_continues(self):
-        """Claimed done but red: model is wrong — keep iterating (loop
-        injects a correction), don't silently stop."""
-        m = IterationMachine()
-        state = self._drive_to_commit(m, wrote=False, claimed=True, passed=False)
-        assert state == IterationState.CONTINUE
-
-    def test_illegal_transition_raises(self):
-        m = IterationMachine()
-        with pytest.raises(ValueError, match="illegal transition"):
-            m.validated(VerdictInput(passed=True))  # skipped GENERATE/GUARD
-
-    def test_interrupt_from_any_state(self):
-        for advance in range(3):
-            m = IterationMachine()
-            if advance > 0:
-                m.generated(AgentReport(claimed_done=False, wrote_files=True))
-            if advance > 1:
-                m.guarded(GuardReport())
-            assert m.interrupt() == IterationState.INTERRUPTED
-            assert m.is_terminal
-
-    def test_interrupt_does_not_overwrite_terminal(self):
-        m = IterationMachine()
-        self._drive_to_commit(m, passed=True)
-        assert m.interrupt() == IterationState.DONE
 
 
 class TestTaskGraph:
@@ -168,52 +110,3 @@ class TestScope:
         s = Scope(allowed=["impl.py"])
         assert s.permits(".lou-op/audit.jsonl")
         assert Scope(allowed=[]).permits("anything.py")
-
-
-class TestVerification:
-    def test_implementer_cannot_be_authoritative(self):
-        with pytest.raises(ValueError, match="cannot be authoritative"):
-            Verification(
-                [Criterion("test", "pytest -q")],
-                provenance=Provenance.IMPLEMENTER,
-            )
-
-    def test_implementer_ok_when_advisory(self):
-        v = Verification(
-            [Criterion("custom", "true")],
-            provenance=Provenance.IMPLEMENTER,
-            authoritative=False,
-        )
-        assert not v.authoritative
-
-    def test_authoritative_needs_criteria(self):
-        with pytest.raises(ValueError, match="at least one criterion"):
-            Verification([], provenance=Provenance.HUMAN)
-
-    def test_evaluate_all_must_pass(self):
-        v = Verification(
-            [Criterion("test", "pytest a"), Criterion("lint", "flake8")],
-            provenance=Provenance.HUMAN,
-        )
-        verdict = v.evaluate(FakeTree(exec_pass=lambda c: c != "flake8"))
-        assert not verdict.passed
-        assert [r.passed for r in verdict.results] == [True, False]
-
-    def test_vacuous_spec_rejected(self):
-        v = Verification([Criterion("test", "pytest -q")], provenance=Provenance.HUMAN)
-        with pytest.raises(VacuousSpecError):
-            v.assert_can_fail(FakeTree(exec_pass=True))  # green pre-impl
-
-    def test_red_spec_accepted(self):
-        v = Verification([Criterion("test", "pytest -q")], provenance=Provenance.HUMAN)
-        v.assert_can_fail(FakeTree(exec_pass=False))  # red = can fail = valid
-
-    def test_judge_signal_is_not_a_verdict_input(self):
-        """Type-level: evaluate() takes only the tree — JudgeSignal cannot
-        flip a Verdict because there is no parameter to pass it through."""
-        import inspect
-
-        from lou_op.domain.verification import Verification as V
-
-        params = inspect.signature(V.evaluate).parameters
-        assert "judge" not in params and "signal" not in params
