@@ -18,10 +18,7 @@ from pathlib import Path
 
 from typing import Callable, List, Optional
 
-from .logutil import get_logger
 from .models import Task
-
-log = get_logger()
 
 GenerateFn = Callable[[str], str]
 
@@ -51,23 +48,34 @@ Rules:
 - success_criteria is the shell command that runs that test file.
 - impl_paths lists the file(s) or directories the implementer may write
   (never the test file itself).
+- shared_files lists project-wide files ANY task may legitimately modify
+  (dependency manifests, lock files, config files). Include these for EVERY
+  task. Examples by ecosystem:
+    Node/JS: ["package.json", "package-lock.json", "tsconfig.json"]
+    Python: ["requirements.txt", "pyproject.toml", "setup.py"]
+    Go: ["go.mod", "go.sum"]
+    Rust: ["Cargo.toml", "Cargo.lock"]
 - Order tasks so earlier ones don't depend on later ones.
 - Match the language, framework, and toolchain specified in the PRD. Do
   NOT default to Python/pytest if the PRD specifies a different stack.
 - If E2E tests require a running dev server, the success_criteria command
   should start the server, run tests, then shut it down in one shell
   command (e.g. using a background process and cleanup trap).
+- If the project has no build harness yet, the FIRST task should create it
+  (config files, entry points, stub pages). Its success criterion is simply
+  that the build or type-check succeeds.
 
 Respond with ONLY a JSON object (no prose, no markdown fences):
 {{
   "tasks": [
     {{
-      "name": "frontend-spa-and-routing",
-      "description": "React SPA with Vite, BrowserRouter configured with basename from VITE_BASE_PATH, and a landing page with Google sign-in button.",
-      "spec_path": "tests/e2e/landing.spec.ts",
-      "spec_content": "import {{ test, expect }} from '@playwright/test';\\n\\ntest('landing page shows sign-in button', async ({{ page }}) => {{\\n  await page.goto('/');\\n  await expect(page.locator('button[data-testid=sign-in]')).toContainText('Sign in with Google');\\n}});",
-      "impl_paths": ["src/", "index.html", "vite.config.ts"],
-      "success_criteria": ["npx vite build && npx vite preview & SERVER_PID=$!; sleep 2; npx playwright test tests/e2e/landing.spec.ts --reporter=line; kill $SERVER_PID"]
+      "name": "example-task",
+      "description": "One sentence description.",
+      "spec_path": "tests/example.test.ts",
+      "spec_content": "import {{ describe, it, expect }} from 'vitest';\\n\\ndescribe('example', () => {{\\n  it('works', () => {{\\n    expect(true).toBe(true);\\n  }});\\n}});",
+      "impl_paths": ["src/example.ts"],
+      "shared_files": ["package.json", "package-lock.json", "tsconfig.json"],
+      "success_criteria": ["npx vitest run tests/example.test.ts"]
     }}
   ]
 }}
@@ -76,11 +84,6 @@ PRD:
 ---
 {prd}
 """
-
-# Shared project files that any task may legitimately need to modify
-# (dependency manifests, lock files). Added to every task's allowed_paths
-# so the guard doesn't revert `npm install` / `npm ci` side effects.
-_SHARED_FILES = ["package.json", "package-lock.json", "data/"]
 
 
 def _strip_fences(text: str) -> str:
@@ -92,20 +95,25 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
-def _build_allowed_paths(impl_paths: List[str], spec_path: str) -> List[str]:
+def _build_allowed_paths(
+    impl_paths: List[str],
+    spec_path: str,
+    shared_files: Optional[List[str]] = None,
+) -> List[str]:
     """Construct the full allowed_paths list for a task.
 
     Includes:
     - The task's impl_paths (source files the model writes)
     - The spec test file path (so the guard doesn't delete+recreate it
       every iteration; _restore_protected still enforces content integrity)
-    - Shared project files (package.json, package-lock.json) so the model
-      can add dependencies without the guard reverting them
+    - Shared project files declared by the spec model (package.json,
+      requirements.txt, go.mod, Cargo.toml, etc.) so the model can add
+      dependencies without the guard reverting them
     """
     paths = list(impl_paths)
     if spec_path not in paths:
         paths.append(spec_path)
-    for shared in _SHARED_FILES:
+    for shared in shared_files or []:
         if shared not in paths:
             paths.append(shared)
     return paths
@@ -136,18 +144,26 @@ def load_cached_tasks(repo_path: Path) -> Optional[List[Task]]:
         if not (repo_path / spec_path).exists():
             return None  # Cache is stale — spec file was deleted
 
+        criteria = spec.get("success_criteria")
+        if not criteria:
+            raise ValueError(
+                f"Task '{spec['name']}' has no success_criteria — "
+                f"the spec model must emit this field"
+            )
+
         tasks.append(
             Task(
                 name=spec["name"],
                 description=spec.get("description", ""),
-                success_criteria=spec.get("success_criteria")
-                or [f"npx vitest run {spec_path}"],
+                success_criteria=criteria,
                 protected_files=[spec_path],
                 allowed_paths=_build_allowed_paths(
-                    list(spec.get("impl_paths", [])), spec_path
+                    list(spec.get("impl_paths", [])),
+                    spec_path,
+                    list(spec.get("shared_files", [])),
                 ),
                 depends_on=spec.get("depends_on", []),
-                max_iterations=spec.get("max_iterations", 4),
+                max_iterations=spec.get("max_iterations", 6),
             )
         )
     return tasks
@@ -188,16 +204,24 @@ def materialize_specs(specs: List[dict], repo_path: Path) -> List[Task]:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(spec["spec_content"], encoding="utf-8")
         impl_paths = list(spec.get("impl_paths", []))
+        shared_files = list(spec.get("shared_files", []))
+        criteria = spec.get("success_criteria")
+
+        if not criteria:
+            raise ValueError(
+                f"Task '{spec['name']}' has no success_criteria — "
+                f"the spec model must emit this field"
+            )
+
+        # the exam is frozen: restored every iteration, never truly
+        # editable by the model (protected_files enforces content)
         tasks.append(
             Task(
                 name=spec["name"],
                 description=spec.get("description", ""),
-                success_criteria=spec.get("success_criteria")
-                or [f"npx vitest run {spec_path}"],
-                # the exam is frozen: restored every iteration, never truly
-                # editable by the model (protected_files enforces content)
+                success_criteria=criteria,
                 protected_files=[spec_path],
-                allowed_paths=_build_allowed_paths(impl_paths, spec_path),
+                allowed_paths=_build_allowed_paths(impl_paths, spec_path, shared_files),
                 depends_on=spec.get("depends_on", []),
                 max_iterations=spec.get("max_iterations", 6),
             )
@@ -217,12 +241,8 @@ def build_tasks_from_prd(
     # Try to load cached tasks first
     cached = load_cached_tasks(repo_path)
     if cached is not None:
-        log.info(
-            "reusing cached task graph",
-            phase="prd",
-            tasks=len(cached),
-            hint="delete .lou-op/tasks.json to force re-decomposition",
-        )
+        print(f"[prd] reusing cached task graph ({len(cached)} tasks)")
+        print(f"[prd] delete .lou-op/tasks.json to force re-decomposition")
         return cached
 
     # Fresh decomposition

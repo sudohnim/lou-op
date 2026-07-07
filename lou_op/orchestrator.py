@@ -404,6 +404,11 @@ class JobManager:
         # job wall-clock ceiling (JobSpec.timeout_seconds, default 2h)
         job_deadline = time.monotonic() + max(60, spec.timeout_seconds)
 
+        tree.commit(
+            "freeze spec files before task loop",
+            "lou-op <lou-op@sudohnim.dev>",
+        )
+
         backend.use_workspace(tree)  # model tools run on the same tree
         log.info("starting tasks", phase="orchestrator", count=len(tasks))
 

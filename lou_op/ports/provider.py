@@ -49,7 +49,8 @@ class Provider(ABC):
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Completion: ...
+    ) -> Completion:
+        ...
 
     def generate(self, prompt: str) -> str:
         """Convenience for single-shot text callers (judge, extractor, PRD

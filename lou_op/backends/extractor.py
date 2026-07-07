@@ -20,7 +20,8 @@ _EXTRACT_INSTRUCTION = (
 
 
 class LLMClient(Protocol):
-    def generate(self, prompt: str) -> str: ...
+    def generate(self, prompt: str) -> str:
+        ...
 
 
 class SLMExtractor:
