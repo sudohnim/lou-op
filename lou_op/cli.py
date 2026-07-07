@@ -167,6 +167,7 @@ def _tasks_from_prd(prd_path, project_path, settings, args):
         model_id=settings.spec_model or settings.model_id,
         base_url=settings.openrouter_base_url,
         timeout=settings.inference_timeout_s,
+        max_tokens=settings.spec_max_tokens,
     )
 
     print(f"decomposing PRD {prd_path.name} (spec model: {client.model_id}) ...")

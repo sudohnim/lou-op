@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
 
 from . import AUTHOR
 from .backends.base import Backend
-from .exec import retry_with_backoff
+from .exec import retry_with_backoff, run_command
 from .git_ops import commit_all
 from .judge import ConsistencyJudge
 from .logutil import bound, get_logger
@@ -46,6 +47,28 @@ class _Stop:
     """Sentinel returned by ``_run_iteration`` to end the loop with a reason."""
 
     reason: str
+
+
+# Build-output dirs conventionally regenerated from source. Cleared before
+# every gate so a stale artifact can never satisfy a test that should rebuild
+# it (e.g. `vite preview` serving an old dist/). Ecosystem-agnostic; the same
+# invariant holds for compiled binaries, bundlers, and static-site builders.
+_BUILD_ARTIFACT_DIRS = ("dist", "build", "target", ".next", "out", ".svelte-kit")
+
+
+def _clean_build_artifacts(work_path: Path) -> None:
+    """Remove known build-output dirs that git does not track, so a gate runs
+    against freshly built (or absent) artifacts, never stale ones. Only
+    untracked dirs are touched — a project that commits a ``build/`` source
+    tree is left alone."""
+    for name in _BUILD_ARTIFACT_DIRS:
+        target = work_path / name
+        if not target.is_dir():
+            continue
+        tracked = run_command(["git", "ls-files", name], work_path)
+        if tracked.stdout.strip():
+            continue  # git tracks files here → it's source, not an artifact
+        shutil.rmtree(target, ignore_errors=True)
 
 
 def _snapshot_protected(repo_path: Path, patterns: List[str]) -> dict[str, str]:
@@ -164,6 +187,7 @@ def _run_task(
     # validators already pass, either the task is done (resume) or the spec is
     # vacuous — either way, don't burn model iterations on it.
     if checks:
+        _clean_build_artifacts(work_path)
         preflight = [check.run(work_path) for check in checks]
         # A gate that can't even execute (missing runner, no tests collected)
         # is a broken harness, not a coding task — abort now instead of
@@ -209,6 +233,10 @@ def _run_task(
             ]
 
     stop_reason = "max_iterations"
+    # cumulative revert counts across iterations: a path reverted repeatedly
+    # means the scope is too narrow (the model keeps writing a file the guard
+    # keeps reverting) — surfaced loudly so scope bugs don't hide as churn.
+    revert_counts: Dict[str, int] = {}
     for iteration in range(1, task.max_iterations + 1):
         with bound(iteration=iteration):
             result = _run_iteration(
@@ -227,6 +255,7 @@ def _run_task(
                 last_validation,
                 last_wrote_files,
                 last_claimed_done,
+                revert_counts,
             )
         if isinstance(result, _Stop):
             stop_reason = result.reason
@@ -272,6 +301,7 @@ def _run_iteration(
     last_validation: List[ValidationResult],
     last_wrote_files: bool,
     last_claimed_done: bool,
+    revert_counts: Dict[str, int],
 ):
     """One iteration. Returns a ``_Stop`` to end the loop with a reason, else
     the tuple ``(result, last_validation, last_wrote_files, last_claimed_done)``."""
@@ -324,10 +354,24 @@ def _run_iteration(
     reverted = scope_policy.enforce(tree)
     if reverted:
         log.info("reverted out-of-scope changes", phase="guard", paths=reverted)
+        for path in reverted:
+            revert_counts[path] = revert_counts.get(path, 0) + 1
+            if revert_counts[path] == 2:
+                # the model keeps writing a file the scope keeps reverting —
+                # almost always an under-scoped task (e.g. the router/entry
+                # file that wires the feature isn't in impl_paths)
+                log.warning(
+                    "scope likely too narrow: repeatedly reverting a path the"
+                    " model keeps writing — add it to the task's allowed_paths"
+                    " (often the integration/wiring file)",
+                    phase="guard",
+                    path=path,
+                )
     _restore_protected(tree, protected)
 
     last_wrote_files = bool(tree.changed_paths())
 
+    _clean_build_artifacts(work_path)
     last_validation = [check.run(work_path) for check in checks]
     passed = all(v.passed for v in last_validation)
     done = passed

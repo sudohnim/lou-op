@@ -143,6 +143,14 @@ class Settings:
     context_budget_tokens: int = 100_000
     inference_timeout_s: int = 300
     silence_timeout_s: int = 300
+    # Output token cap for the PRD decomposition call. Decompositions embed
+    # every task's spec file as JSON, so they run long — a low cap truncates
+    # the JSON mid-string and parsing dies cryptically.
+    spec_max_tokens: int = 32_000
+    # Ref a job branch forks from when running in place on an existing repo.
+    # Empty => auto-detect (origin/HEAD → main → master → HEAD). Keeps reruns
+    # from stacking on each other's committed output.
+    base_branch: str = ""
 
     # Where job working repos live.
     jobs_dir: Path = Path(".lou-op-jobs")
@@ -175,5 +183,7 @@ class Settings:
             context_budget_tokens=_env_int("LOU_CONTEXT_BUDGET", 100_000),
             inference_timeout_s=_env_int("LOU_INFERENCE_TIMEOUT", 300),
             silence_timeout_s=_env_int("LOU_SILENCE_TIMEOUT", 300),
+            spec_max_tokens=_env_int("LOU_SPEC_MAX_TOKENS", 32_000),
+            base_branch=_env("LOU_BASE_BRANCH", ""),
             jobs_dir=Path(_env("LOU_JOBS_DIR", ".lou-op-jobs")),
         )

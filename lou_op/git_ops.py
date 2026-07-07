@@ -53,13 +53,48 @@ def current_branch(repo_path: Path) -> str:
     return _git(repo_path, "rev-parse", "--abbrev-ref", "HEAD")
 
 
-def checkout_branch(repo_path: Path, branch: str) -> None:
-    """Create-or-switch to ``branch``."""
+def checkout_branch(repo_path: Path, branch: str, base: Optional[str] = None) -> None:
+    """Create-or-switch to ``branch``.
+
+    If ``base`` is given and the branch does not yet exist, fork it from
+    ``base`` (a clean base ref) instead of the current HEAD — so a new job does
+    not stack on top of a previous job's committed output.
+    """
     existing = run_command(["git", "rev-parse", "--verify", branch], repo_path)
     if existing.passed:
         _git(repo_path, "checkout", branch)
+    elif base:
+        _git(repo_path, "checkout", "-B", branch, base)
     else:
         _git(repo_path, "checkout", "-B", branch)
+
+
+def _ref_exists(repo_path: Path, ref: str) -> bool:
+    return run_command(
+        ["git", "rev-parse", "--verify", "--quiet", ref], repo_path
+    ).passed
+
+
+def resolve_base_ref(repo_path: Path, configured: str = "") -> str:
+    """The ref a new job branch should fork from — a stable base, never the tip
+    of a previous job branch, so runs don't accumulate each other's output.
+
+    Order: explicit config → ``origin/HEAD`` → ``main`` → ``master`` → current
+    HEAD (the last is the safe no-op fallback for a fresh single-branch repo).
+    """
+    if configured and _ref_exists(repo_path, configured):
+        return configured
+    head = run_command(
+        ["git", "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], repo_path
+    )
+    if head.passed and head.stdout.strip():
+        ref = head.stdout.strip().split("refs/remotes/", 1)[-1]  # e.g. origin/main
+        if _ref_exists(repo_path, ref):
+            return ref
+    for name in ("main", "master"):
+        if _ref_exists(repo_path, name):
+            return name
+    return "HEAD"
 
 
 def commit_all(repo_path: Path, message: str, author: str) -> str:

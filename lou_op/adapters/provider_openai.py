@@ -33,6 +33,7 @@ class OpenAICompatProvider(Provider):
         price_in_per_mtok: float = 0.0,
         price_out_per_mtok: float = 0.0,
         retries: int = 3,
+        max_tokens: Optional[int] = None,
     ) -> None:
         self.base_url = validate_base_url(base_url.rstrip("/"))
         self.api_key = api_key
@@ -43,6 +44,7 @@ class OpenAICompatProvider(Provider):
         self.price_in = price_in_per_mtok
         self.price_out = price_out_per_mtok
         self.retries = max(1, retries)
+        self.max_tokens = max_tokens
         self.usage = Usage()
         self.cost_usd = 0.0
 
@@ -79,6 +81,8 @@ class OpenAICompatProvider(Provider):
             "messages": messages,
             "temperature": self.temperature,
         }
+        if self.max_tokens is not None:
+            payload["max_tokens"] = self.max_tokens
         if tools:
             payload["tools"] = tools
         data = self._post(payload)
@@ -95,6 +99,10 @@ class OpenAICompatProvider(Provider):
         self.usage.prompt_tokens += usage.prompt_tokens
         self.usage.completion_tokens += usage.completion_tokens
         self.cost_usd += cost
+        choice = data["choices"][0]
         return Completion(
-            message=data["choices"][0]["message"], usage=usage, cost_usd=cost
+            message=choice["message"],
+            usage=usage,
+            cost_usd=cost,
+            finish_reason=choice.get("finish_reason") or "",
         )

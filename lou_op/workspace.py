@@ -17,9 +17,11 @@ from .git_ops import (
     commit_all,
     ensure_repo,
     push,
+    resolve_base_ref,
     revert_to,
     seed_gitignore,
 )
+from .logutil import get_logger
 
 
 class Workspace(ABC):
@@ -61,10 +63,12 @@ class GitWorkspace(Workspace):
         *,
         remote: Optional[str] = None,
         project_path: Optional[Path] = None,
+        base_branch: str = "",
     ) -> None:
         self._jobs_dir = jobs_dir
         self._remote = remote
         self._project_path = project_path
+        self._base_branch = base_branch
         self._path: Optional[Path] = None
         self._branch: str = ""
 
@@ -77,11 +81,26 @@ class GitWorkspace(Workspace):
     def setup(self, job_id: str, branch: str) -> None:
         self._branch = branch
         if self._project_path is not None:
+            # Working in place on an existing repo: fork the job branch from a
+            # clean base ref, NOT the current HEAD — otherwise each run stacks
+            # on the previous run's committed output and the model fights stale,
+            # contradictory files. Newly-materialized spec files are untracked
+            # and carry across the checkout.
             self._path = self._project_path
+            base = resolve_base_ref(self._path, self._base_branch)
+            log = get_logger()
+            log.info(
+                "forking job branch from clean base",
+                phase="workspace",
+                base=base,
+                branch=branch,
+            )
+            checkout_branch(self._path, branch, base=base)
         else:
+            # Fresh per-job sub-repo: nothing to inherit, branch from HEAD.
             self._path = self._jobs_dir / job_id
             ensure_repo(self._path, self._remote)
-        checkout_branch(self._path, branch)
+            checkout_branch(self._path, branch)
         seed_gitignore(self._path)
 
     def checkpoint(self, message: str) -> str:

@@ -65,3 +65,24 @@ def test_loop_iterates_until_pass(repo: Path):
     assert len(results) == 2
     assert not results[0].passed
     assert results[1].passed
+
+
+def test_clean_build_artifacts_removes_untracked_keeps_tracked(tmp_path: Path):
+    """Backstop against stale-artifact false passes: an untracked build dir is
+    wiped before a gate runs, but a committed ``build/`` source tree is left
+    alone."""
+    import subprocess
+
+    from lou_op.loop import _clean_build_artifacts
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "dist").mkdir()
+    (tmp_path / "dist" / "stale.js").write_text("old", encoding="utf-8")
+    (tmp_path / "build").mkdir()
+    (tmp_path / "build" / "src.py").write_text("real", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "build/src.py"], check=True)
+
+    _clean_build_artifacts(tmp_path)
+
+    assert not (tmp_path / "dist").exists()  # untracked artifact → removed
+    assert (tmp_path / "build" / "src.py").exists()  # tracked source → kept

@@ -48,6 +48,14 @@ Rules:
 - success_criteria is the shell command that runs that test file.
 - impl_paths lists the file(s) or directories the implementer may write
   (never the test file itself).
+- impl_paths MUST include the file that WIRES the new code into the app — the
+  router, entry point, or module registry the gate exercises (e.g. React
+  src/App.tsx or main.tsx; Go main.go / cmd/*/main.go; Python app.py or
+  __init__.py; Rust main.rs / lib.rs mod declarations). If a task's test
+  checks integration (routing, mounting, request handling) but the wiring file
+  is owned by another task, the guard reverts that edit every iteration and
+  the task can NEVER pass. Do not split a feature from the file that activates
+  it — the task that must wire it up must be allowed to write it.
 - shared_files lists project-wide files ANY task may legitimately modify
   (dependency manifests, lock files, config files). Include these for EVERY
   task. Examples by ecosystem:
@@ -58,24 +66,58 @@ Rules:
 - Order tasks so earlier ones don't depend on later ones.
 - Match the language, framework, and toolchain specified in the PRD. Do
   NOT default to Python/pytest if the PRD specifies a different stack.
-- If E2E tests require a running dev server, the success_criteria command
-  should start the server, run tests, then shut it down in one shell
-  command (e.g. using a background process and cleanup trap).
+- For E2E/browser tests that need a running app, let the TEST RUNNER own the
+  server lifecycle — never hand-roll it in the shell. E.g. Playwright's
+  `webServer` in playwright.config, so the gate is just `npx playwright test`.
+  Its command MUST rebuild from source then serve
+  (e.g. "npm run build && npm run preview") — NEVER a bare "preview"/"serve"
+  that reuses a stale dist/, or the gate passes against an old build. Do NOT
+  write `serve & sleep N; test; kill`: the sleep races the build, and a failed
+  build then looks like a test failure instead of a broken harness.
+- Every success_criteria must be reproducible from a clean checkout: produce
+  whatever it tests from CURRENT source inside the command, then test. Never
+  test a pre-built artifact (dist/, target/, build/, .next/, out/) or a
+  process started outside the command — a gate that reads stale state can go
+  green while the committed source is wrong.
+- Serve the E2E build at the ROOT path, and have the tests navigate from root
+  (page.goto('/...')). A subpath deploy (e.g. /kuma) is a production
+  build-config concern; if the E2E server base and the test navigation
+  disagree, every route 404s and the gate can never pass.
 - If the project has no build harness yet, the FIRST task should create it
   (config files, entry points, stub pages). Its success criterion is simply
   that the build or type-check succeeds.
+- The build/scaffold gate MUST TYPE-CHECK or COMPILE, not merely bundle —
+  bundlers (vite/esbuild/webpack) skip type errors, so a task that imports a
+  symbol another task never exported still "builds", and the break only shows
+  up at runtime. Use the type/compile checker for the stack: TS
+  "tsc --noEmit", Go "go build ./...", Rust "cargo build", Python
+  "mypy ." or an import smoke-test. This is what catches cross-task API drift
+  (one task defines `parseX`, another imports `detectX`).
 
-Respond with ONLY a JSON object (no prose, no markdown fences):
+Respond with ONLY a JSON object (no prose, no markdown fences). The two
+examples below show a pure-unit task and an E2E task — note the E2E gate is a
+bare `playwright test` (no `serve & sleep; kill`) and the spec navigates from
+root; the server is owned by `webServer` in the playwright.config the
+implementer writes:
 {{
   "tasks": [
     {{
-      "name": "example-task",
-      "description": "One sentence description.",
-      "spec_path": "tests/example.test.ts",
-      "spec_content": "import {{ describe, it, expect }} from 'vitest';\\n\\ndescribe('example', () => {{\\n  it('works', () => {{\\n    expect(true).toBe(true);\\n  }});\\n}});",
-      "impl_paths": ["src/example.ts"],
+      "name": "slugify-util",
+      "description": "Pure slugify helper.",
+      "spec_path": "tests/slugify.test.ts",
+      "spec_content": "import {{ describe, it, expect }} from 'vitest';\\nimport {{ slugify }} from '../src/slugify';\\n\\ndescribe('slugify', () => {{\\n  it('lowercases and dashes', () => {{\\n    expect(slugify('A B')).toBe('a-b');\\n  }});\\n}});",
+      "impl_paths": ["src/slugify.ts"],
       "shared_files": ["package.json", "package-lock.json", "tsconfig.json"],
-      "success_criteria": ["npx vitest run tests/example.test.ts"]
+      "success_criteria": ["npx vitest run tests/slugify.test.ts"]
+    }},
+    {{
+      "name": "landing-page",
+      "description": "Landing page with a sign-in button, served at root.",
+      "spec_path": "tests/e2e/landing.spec.ts",
+      "spec_content": "import {{ test, expect }} from '@playwright/test';\\n\\ntest('shows sign-in', async ({{ page }}) => {{\\n  await page.goto('/');\\n  await expect(page.getByTestId('sign-in')).toBeVisible();\\n}});",
+      "impl_paths": ["src/", "index.html", "vite.config.ts", "playwright.config.ts"],
+      "shared_files": ["package.json", "package-lock.json", "tsconfig.json"],
+      "success_criteria": ["npx playwright test tests/e2e/landing.spec.ts"]
     }}
   ]
 }}
@@ -95,10 +137,43 @@ def _strip_fences(text: str) -> str:
     return text.strip()
 
 
+# Dependency manifests / lock / config files that ANY task may legitimately
+# need to touch (add a dep, tweak build config). If one is present in the
+# repo it is ALWAYS unioned into allowed_paths, even when the spec model
+# forgets to declare it — the guard must never revert a real manifest edit.
+# Ecosystem-agnostic: only files that actually exist are added.
+_KNOWN_MANIFESTS = (
+    "package.json",
+    "package-lock.json",
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "tsconfig.json",
+    "requirements.txt",
+    "pyproject.toml",
+    "setup.py",
+    "setup.cfg",
+    "go.mod",
+    "go.sum",
+    "Cargo.toml",
+    "Cargo.lock",
+    "Gemfile",
+    "Gemfile.lock",
+    "composer.json",
+    "pom.xml",
+    "build.gradle",
+)
+
+
+def _detect_shared_files(repo_path: Path) -> List[str]:
+    """Manifests that actually exist in the repo — always guard-exempt."""
+    return [m for m in _KNOWN_MANIFESTS if (repo_path / m).exists()]
+
+
 def _build_allowed_paths(
     impl_paths: List[str],
     spec_path: str,
-    shared_files: Optional[List[str]] = None,
+    shared_files: Optional[List[str]],
+    repo_path: Path,
 ) -> List[str]:
     """Construct the full allowed_paths list for a task.
 
@@ -106,17 +181,47 @@ def _build_allowed_paths(
     - The task's impl_paths (source files the model writes)
     - The spec test file path (so the guard doesn't delete+recreate it
       every iteration; _restore_protected still enforces content integrity)
-    - Shared project files declared by the spec model (package.json,
-      requirements.txt, go.mod, Cargo.toml, etc.) so the model can add
-      dependencies without the guard reverting them
+    - Shared project files the spec model declared, PLUS every known manifest
+      actually present in the repo (belt-and-suspenders: robustness does not
+      depend on the model remembering to declare them)
     """
     paths = list(impl_paths)
     if spec_path not in paths:
         paths.append(spec_path)
-    for shared in shared_files or []:
+    detected = _detect_shared_files(repo_path)
+    for shared in list(shared_files or []) + detected:
         if shared not in paths:
             paths.append(shared)
     return paths
+
+
+def _task_from_spec(spec: dict, repo_path: Path) -> Task:
+    """Build one frozen-spec Task from a decomposed spec dict.
+
+    The exam is frozen: ``protected_files`` restores the spec file every
+    iteration, so the model can never edit its own grader.
+    """
+    criteria = spec.get("success_criteria")
+    if not criteria:
+        raise ValueError(
+            f"Task '{spec['name']}' has no success_criteria — "
+            "the spec model must emit this field"
+        )
+    spec_path = spec["spec_path"]
+    return Task(
+        name=spec["name"],
+        description=spec.get("description", ""),
+        success_criteria=criteria,
+        protected_files=[spec_path],
+        allowed_paths=_build_allowed_paths(
+            list(spec.get("impl_paths", [])),
+            spec_path,
+            list(spec.get("shared_files", [])),
+            repo_path,
+        ),
+        depends_on=spec.get("depends_on", []),
+        max_iterations=spec.get("max_iterations", 6),
+    )
 
 
 def load_cached_tasks(repo_path: Path) -> Optional[List[Task]]:
@@ -144,28 +249,7 @@ def load_cached_tasks(repo_path: Path) -> Optional[List[Task]]:
         if not (repo_path / spec_path).exists():
             return None  # Cache is stale — spec file was deleted
 
-        criteria = spec.get("success_criteria")
-        if not criteria:
-            raise ValueError(
-                f"Task '{spec['name']}' has no success_criteria — "
-                f"the spec model must emit this field"
-            )
-
-        tasks.append(
-            Task(
-                name=spec["name"],
-                description=spec.get("description", ""),
-                success_criteria=criteria,
-                protected_files=[spec_path],
-                allowed_paths=_build_allowed_paths(
-                    list(spec.get("impl_paths", [])),
-                    spec_path,
-                    list(spec.get("shared_files", [])),
-                ),
-                depends_on=spec.get("depends_on", []),
-                max_iterations=spec.get("max_iterations", 6),
-            )
-        )
+        tasks.append(_task_from_spec(spec, repo_path))
     return tasks
 
 
@@ -180,10 +264,37 @@ def save_task_cache(specs: List[dict], repo_path: Path) -> None:
     )
 
 
-def decompose_prd(prd_text: str, generate: GenerateFn) -> List[dict]:
-    """Ask the model to turn a PRD into task dicts with embedded specs."""
-    raw = generate(_PRD_PROMPT.format(prd=prd_text))
-    data = json.loads(_strip_fences(raw))
+def decompose_prd(
+    prd_text: str, generate: GenerateFn, *, save_dir: Optional[Path] = None
+) -> List[dict]:
+    """Ask the model to turn a PRD into task dicts with embedded specs.
+
+    Decompositions are large (every spec file embedded as JSON), so a single
+    malformed response is common. Retry once — LLMs usually emit clean JSON
+    the second time — and on give-up dump the raw text under ``save_dir`` so
+    the failure is inspectable, not a bare column offset. Truncation raises
+    from ``generate`` (TruncatedResponseError) and is deliberately NOT retried:
+    the same cap would just truncate again.
+    """
+    prompt = _PRD_PROMPT.format(prd=prd_text)
+    last_raw = ""
+    last_err: Optional[json.JSONDecodeError] = None
+    for _ in range(2):
+        last_raw = generate(prompt)
+        try:
+            data = json.loads(_strip_fences(last_raw))
+            break
+        except json.JSONDecodeError as exc:
+            last_err = exc
+    else:
+        hint = ""
+        if save_dir is not None:
+            dump = Path(save_dir) / ".lou-op" / "decomposition_raw.txt"
+            dump.parent.mkdir(parents=True, exist_ok=True)
+            dump.write_text(last_raw, encoding="utf-8")
+            hint = f" — raw response saved to {dump}"
+        raise ValueError(f"spec model returned invalid JSON: {last_err}{hint}")
+
     tasks = data.get("tasks", [])
     if not tasks:
         raise ValueError("PRD decomposition produced no tasks")
@@ -203,29 +314,7 @@ def materialize_specs(specs: List[dict], repo_path: Path) -> List[Task]:
         target = repo_path / spec_path
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(spec["spec_content"], encoding="utf-8")
-        impl_paths = list(spec.get("impl_paths", []))
-        shared_files = list(spec.get("shared_files", []))
-        criteria = spec.get("success_criteria")
-
-        if not criteria:
-            raise ValueError(
-                f"Task '{spec['name']}' has no success_criteria — "
-                f"the spec model must emit this field"
-            )
-
-        # the exam is frozen: restored every iteration, never truly
-        # editable by the model (protected_files enforces content)
-        tasks.append(
-            Task(
-                name=spec["name"],
-                description=spec.get("description", ""),
-                success_criteria=criteria,
-                protected_files=[spec_path],
-                allowed_paths=_build_allowed_paths(impl_paths, spec_path, shared_files),
-                depends_on=spec.get("depends_on", []),
-                max_iterations=spec.get("max_iterations", 6),
-            )
-        )
+        tasks.append(_task_from_spec(spec, repo_path))
     return tasks
 
 
@@ -242,10 +331,10 @@ def build_tasks_from_prd(
     cached = load_cached_tasks(repo_path)
     if cached is not None:
         print(f"[prd] reusing cached task graph ({len(cached)} tasks)")
-        print(f"[prd] delete .lou-op/tasks.json to force re-decomposition")
+        print("[prd] delete .lou-op/tasks.json to force re-decomposition")
         return cached
 
     # Fresh decomposition
-    specs = decompose_prd(prd_text, generate)
+    specs = decompose_prd(prd_text, generate, save_dir=repo_path)
     save_task_cache(specs, repo_path)
     return materialize_specs(specs, repo_path)

@@ -22,11 +22,18 @@ class Usage:
         return self.prompt_tokens + self.completion_tokens
 
 
+class TruncatedResponseError(Exception):
+    """Raised when the model stopped because it hit the output token cap
+    (``finish_reason == "length"``) — the response is incomplete, so parsing
+    it would fail cryptically. Callers should raise max_tokens, not retry."""
+
+
 @dataclass
 class Completion:
     message: Dict[str, Any]  # OpenAI-shape assistant message
     usage: Usage = field(default_factory=Usage)
     cost_usd: float = 0.0
+    finish_reason: str = ""  # "stop" | "length" | "tool_calls" | ...
 
     @property
     def text(self) -> str:
@@ -49,11 +56,20 @@ class Provider(ABC):
         self,
         messages: List[Dict[str, Any]],
         tools: Optional[List[Dict[str, Any]]] = None,
-    ) -> Completion:
-        ...
+    ) -> Completion: ...
 
     def generate(self, prompt: str) -> str:
         """Convenience for single-shot text callers (judge, extractor, PRD
-        planner) — same accounted path as the agents."""
+        planner) — same accounted path as the agents.
+
+        A single-shot response cut off at the token cap is never usable, so
+        surface truncation loudly instead of returning a half-response that
+        fails downstream (e.g. as invalid JSON)."""
         completion = self.complete([{"role": "user", "content": prompt}])
+        if completion.finish_reason == "length":
+            raise TruncatedResponseError(
+                f"model response truncated at the output token cap"
+                f" ({completion.usage.completion_tokens} tokens) — raise"
+                f" max_tokens for this call"
+            )
         return completion.text

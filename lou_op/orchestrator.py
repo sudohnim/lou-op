@@ -101,7 +101,10 @@ def _make_workspace(spec: JobSpec, settings: Settings) -> Workspace:
     key = spec.workspace_type.strip().lower()
     if key == "git":
         return GitWorkspace(
-            settings.jobs_dir, remote=spec.git_remote, project_path=project_path
+            settings.jobs_dir,
+            remote=spec.git_remote,
+            project_path=project_path,
+            base_branch=settings.base_branch,
         )
     if key == "null":
         return NullWorkspace(settings.jobs_dir)

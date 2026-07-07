@@ -7,6 +7,36 @@ import pytest
 from lou_op.workspace import GitWorkspace, NullWorkspace
 
 
+def test_in_place_job_forks_from_base_not_prior_run(tmp_path: Path) -> None:
+    """A rerun on an existing repo must start from the clean base branch, not
+    inherit the previous run's committed output."""
+    import subprocess
+
+    def git(*args: str) -> None:
+        subprocess.run(
+            ["git", "-C", str(tmp_path), *args], check=True, capture_output=True
+        )
+
+    git("init", "-q")
+    git("config", "user.email", "t@t")
+    git("config", "user.name", "t")
+    git("checkout", "-q", "-B", "main")
+    (tmp_path / "base.txt").write_text("base", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "base")
+    # simulate a prior job that committed cruft on its own branch
+    git("checkout", "-q", "-B", "lou-op/job-old")
+    (tmp_path / "cruft.txt").write_text("stale", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "old job")  # HEAD now on the old job branch
+
+    ws = GitWorkspace(tmp_path, project_path=tmp_path, base_branch="main")
+    ws.setup("job-new", "lou-op/job-new")
+
+    assert (tmp_path / "base.txt").exists()  # clean base carried over
+    assert not (tmp_path / "cruft.txt").exists()  # prior run's output NOT inherited
+
+
 def test_git_workspace_setup_creates_git_dir(tmp_path: Path) -> None:
     ws = GitWorkspace(tmp_path)
     ws.setup("job1", "lou-op/job-1")
