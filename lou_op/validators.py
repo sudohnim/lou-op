@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import List
 
 from .exec import run_command, run_shell
-from .models import Task, ValidationResult
+from .models import Task, ValidationResult, ValidationStatus
 
 
 class Validator(ABC):
@@ -21,6 +21,22 @@ class Validator(ABC):
 
     @abstractmethod
     def run(self, repo_path: Path) -> ValidationResult: ...
+
+
+def _classify(result) -> ValidationStatus:
+    """PASS/FAIL/ERROR for a shell result. ERROR = the gate could not execute
+    at all (missing runner, timeout), so feeding it to the model is wasted
+    turns — see ValidationStatus. Kept deliberately conservative: "no tests
+    collected" is NOT an error, because a TDD loop writes the tests during
+    iteration, so an empty gate before work is expected, not broken."""
+    if result.passed:
+        return ValidationStatus.PASS
+    # 127 = command not found, 126 = found but not executable (POSIX shells)
+    if result.timed_out or result.returncode in (126, 127):
+        return ValidationStatus.ERROR
+    if "command not found" in (result.stdout + result.stderr).lower():
+        return ValidationStatus.ERROR
+    return ValidationStatus.FAIL
 
 
 class CommandValidator(Validator):
@@ -40,7 +56,9 @@ class CommandValidator(Validator):
         output = (result.stdout + result.stderr).strip()
         if result.timed_out:
             output = f"(timed out after {self.timeout}s)\n{output}"
-        return ValidationResult(self.name, result.passed, output)
+        return ValidationResult(
+            self.name, result.passed, output, status=_classify(result)
+        )
 
 
 class PythonLintValidator(Validator):

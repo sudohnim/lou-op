@@ -443,9 +443,33 @@ class JobManager:
                             "task": task.name,
                             "n": r.iteration,
                             "passed": r.passed,
+                            "wrote_files": r.wrote_files,
                             "commit": r.commit,
+                            # validator output is the single most useful thing
+                            # for debugging; keep it in the log of record
+                            "validators": [
+                                {
+                                    "name": v.name,
+                                    "status": v.status.value,
+                                    "output": v.output[-2000:],
+                                }
+                                for v in r.validations
+                            ],
                         },
+                        version=2,
                     )
+                # terminal reason for the whole task (last record carries it)
+                self.store.append(
+                    state.job_id,
+                    "task_finished",
+                    {
+                        "task": task.name,
+                        "passed": passed,
+                        "stop_reason": (
+                            results[-1].stop_reason if results else "no_iterations"
+                        ),
+                    },
+                )
                 with state_lock:
                     state.commits.extend(r.commit for r in results)
                     if passed:

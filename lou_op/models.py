@@ -28,6 +28,21 @@ class TaskStatus(str, Enum):
     FAILED = "failed"
 
 
+class ValidationStatus(str, Enum):
+    """Outcome of one gate check.
+
+    The FAIL/ERROR split is the whole point: FAIL means the gate ran and the
+    code is wrong (feed it back to the model); ERROR means the gate itself
+    could not execute (runner missing, timed out, no tests collected) — a
+    broken harness, not a coding problem, so burning model turns on it is
+    pointless.
+    """
+
+    PASS = "pass"
+    FAIL = "fail"
+    ERROR = "error"
+
+
 class Task(BaseModel):
     """A unit of work. ``success_criteria`` entries are shell commands."""
 
@@ -91,6 +106,19 @@ class ValidationResult:
     name: str
     passed: bool
     output: str
+    # PASS/FAIL/ERROR. Defaults derive from ``passed`` so legacy call sites and
+    # tests that only pass a bool stay coherent; validators set it explicitly.
+    status: ValidationStatus = ValidationStatus.FAIL
+
+    def __post_init__(self) -> None:
+        if self.passed:
+            self.status = ValidationStatus.PASS
+        elif self.status is ValidationStatus.PASS:
+            self.status = ValidationStatus.FAIL
+
+    @property
+    def errored(self) -> bool:
+        return self.status is ValidationStatus.ERROR
 
 
 @dataclass
@@ -117,3 +145,8 @@ class IterationResult:
     done: bool
     commit: str
     validations: List[ValidationResult] = field(default_factory=list)
+    wrote_files: bool = True
+    # Terminal reason the task stopped, set on the last result of a run:
+    # "passed" | "done" | "max_iterations" | "no_progress" | "job_timeout"
+    # | "env_not_ready" | "scope_empty". Empty on non-terminal iterations.
+    stop_reason: str = ""

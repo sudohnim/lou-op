@@ -325,6 +325,83 @@ def _ping(args: argparse.Namespace) -> int:
     return 0 if result.ok else 1
 
 
+def _render_why(run_id: str, events: list) -> None:
+    """Render the event log as a per-task debugging report: what stopped each
+    task and the actual gate output — the single source of truth, no scrolling
+    interleaved stderr."""
+    by_task: dict[str, list] = {}
+    order: list[str] = []
+    header = f"job {run_id}"
+    footer = ""
+    for e in events:
+        d = e.data
+        if e.kind == "run_finished":
+            footer = f"run {d.get('status', '?')}"
+            if d.get("error"):
+                footer += f" — {d['error']}"
+        task = d.get("task")
+        if task is None:
+            continue
+        if task not in by_task:
+            by_task[task] = []
+            order.append(task)
+        by_task[task].append(e)
+
+    print(header)
+    for task in order:
+        evs = by_task[task]
+        finished = next((e for e in evs if e.kind == "task_finished"), None)
+        reason = finished.data.get("stop_reason", "?") if finished else "in-flight"
+        ok = finished.data.get("passed", False) if finished else False
+        mark = "PASS" if ok else "FAIL"
+        print(f"\n[{mark}] {task}  ({reason})")
+        for e in evs:
+            if e.kind != "iteration":
+                continue
+            d = e.data
+            wrote = "" if d.get("wrote_files", True) else " no-write"
+            print(
+                f"  iter {d.get('n')}: "
+                f"{'pass' if d.get('passed') else 'fail'}{wrote}"
+            )
+            for v in d.get("validators", []):
+                st = v.get("status", "?")
+                if st == "pass":
+                    continue
+                print(f"    {st.upper()} {v.get('name')}")
+                out = (v.get("output") or "").strip()
+                for line in out.splitlines()[-12:]:
+                    print(f"      {line}")
+    if footer:
+        print(f"\n{footer}")
+
+
+def _why(args: argparse.Namespace) -> int:
+    from .adapters.store_sqlite import SqliteStore
+
+    settings = Settings.from_env()
+    if args.jobs_dir:
+        settings.jobs_dir = Path(args.jobs_dir)
+    store = SqliteStore(settings.jobs_dir / "events.db")
+
+    run_id = args.job
+    if not run_id:
+        ids = store.run_ids()
+        if not ids:
+            print("no jobs found", file=sys.stderr)
+            return 1
+        # job ids are uuids (no chronological order) — pick whichever run has
+        # the newest event, since seq is a global autoincrement
+        run_id = max(ids, key=lambda rid: store.events(rid)[-1].seq)
+
+    events = store.events(run_id)
+    if not events:
+        print(f"no events for job {run_id}", file=sys.stderr)
+        return 1
+    _render_why(run_id, events)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="lou-op")
     parser.add_argument(
@@ -400,6 +477,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     ping_p.add_argument("--model", default="", help="override LOU_MODEL_ID")
     ping_p.set_defaults(func=_ping)
+
+    why = sub.add_parser(
+        "why",
+        help="explain a job from the event log: per-task stop reason + gate output",
+    )
+    why.add_argument("job", nargs="?", default="", help="job id (default: latest)")
+    why.add_argument("--jobs-dir", dest="jobs_dir", default="")
+    why.set_defaults(func=_why)
 
     args = parser.parse_args(argv)
     configure_logging(

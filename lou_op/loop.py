@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Optional
 
@@ -38,6 +39,13 @@ def _status_tag(passed: bool, done: bool) -> str:
 
 
 log = get_logger()
+
+
+@dataclass
+class _Stop:
+    """Sentinel returned by ``_run_iteration`` to end the loop with a reason."""
+
+    reason: str
 
 
 def _snapshot_protected(repo_path: Path, patterns: List[str]) -> dict[str, str]:
@@ -142,7 +150,13 @@ def _run_task(
         )
         return [
             IterationResult(
-                iteration=0, passed=False, done=False, commit="", validations=[]
+                iteration=0,
+                passed=False,
+                done=False,
+                commit="",
+                validations=[],
+                wrote_files=False,
+                stop_reason="scope_empty",
             )
         ]
 
@@ -151,6 +165,29 @@ def _run_task(
     # vacuous — either way, don't burn model iterations on it.
     if checks:
         preflight = [check.run(work_path) for check in checks]
+        # A gate that can't even execute (missing runner, no tests collected)
+        # is a broken harness, not a coding task — abort now instead of
+        # burning the model against a gate that can never turn green.
+        errored = [v for v in preflight if v.errored]
+        if errored:
+            log.error(
+                "environment not ready — gate cannot execute; aborting task"
+                " (install deps / fix the test runner)",
+                phase="guard",
+                validators=", ".join(v.name for v in errored),
+                output=errored[0].output[-800:],
+            )
+            return [
+                IterationResult(
+                    iteration=0,
+                    passed=False,
+                    done=False,
+                    commit="",
+                    validations=preflight,
+                    wrote_files=False,
+                    stop_reason="env_not_ready",
+                )
+            ]
         preflight_passed = all(v.passed for v in preflight)
         log.debug("preflight done", all_passed=preflight_passed)
         if preflight_passed:
@@ -166,9 +203,12 @@ def _run_task(
                     done=True,
                     commit="",
                     validations=preflight,
+                    wrote_files=False,
+                    stop_reason="already_passing",
                 )
             ]
 
+    stop_reason = "max_iterations"
     for iteration in range(1, task.max_iterations + 1):
         with bound(iteration=iteration):
             result = _run_iteration(
@@ -188,13 +228,31 @@ def _run_task(
                 last_wrote_files,
                 last_claimed_done,
             )
-        if result is None:
+        if isinstance(result, _Stop):
+            stop_reason = result.reason
             break
         iter_result, last_validation, last_wrote_files, last_claimed_done = result
         results.append(iter_result)
         if iter_result.done:
+            stop_reason = "passed" if iter_result.passed else "done"
             break
 
+    # Stamp the terminal reason on the last record so the Store (and `lou-op
+    # why`) can report why the task ended, even when it stopped mid-flight.
+    if results:
+        results[-1].stop_reason = stop_reason
+    else:
+        results.append(
+            IterationResult(
+                iteration=0,
+                passed=False,
+                done=False,
+                commit="",
+                validations=[],
+                wrote_files=False,
+                stop_reason=stop_reason,
+            )
+        )
     return results
 
 
@@ -215,11 +273,11 @@ def _run_iteration(
     last_wrote_files: bool,
     last_claimed_done: bool,
 ):
-    """One iteration. Returns ``None`` to stop the loop, else the tuple
-    ``(result, last_validation, last_wrote_files, last_claimed_done)``."""
+    """One iteration. Returns a ``_Stop`` to end the loop with a reason, else
+    the tuple ``(result, last_validation, last_wrote_files, last_claimed_done)``."""
     if deadline is not None and time.monotonic() >= deadline:
         log.warning("job wall-clock timeout — stopping", phase="guard")
-        return None
+        return _Stop("job_timeout")
 
     # B — no-op short circuit
     if iteration > 1 and not last_wrote_files and not last_claimed_done:
@@ -227,7 +285,7 @@ def _run_iteration(
             "no files written and tests still failing — stopping"
             " (manual intervention needed)"
         )
-        return None
+        return _Stop("no_progress")
 
     # judge: consistency check before each iteration (skip first — no history)
     if iteration > 1 and consistency_judge is not None:
@@ -279,6 +337,24 @@ def _run_iteration(
         passed=passed,
         wrote_files=last_wrote_files,
     )
+    # Surface WHY the gate is red to the operator, not just passed=False. The
+    # ERROR/FAIL split tells "broken runner" from "wrong code" at a glance.
+    if not passed:
+        for v in last_validation:
+            if v.errored:
+                log.error(
+                    "gate ERROR — runner could not execute",
+                    phase="validate",
+                    validator=v.name,
+                    output=v.output[-800:],
+                )
+            elif not v.passed:
+                log.warning(
+                    "gate FAILED",
+                    phase="validate",
+                    validator=v.name,
+                    output=v.output[-800:],
+                )
 
     if output.scratchpad:
         write_scratchpad(work_path, output.scratchpad)
@@ -314,5 +390,6 @@ def _run_iteration(
         done=done,
         commit=sha,
         validations=last_validation,
+        wrote_files=last_wrote_files,
     )
     return iter_result, last_validation, last_wrote_files, last_claimed_done

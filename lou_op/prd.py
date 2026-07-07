@@ -80,7 +80,7 @@ PRD:
 # Shared project files that any task may legitimately need to modify
 # (dependency manifests, lock files). Added to every task's allowed_paths
 # so the guard doesn't revert `npm install` / `npm ci` side effects.
-_SHARED_FILES = ["package.json", "package-lock.json"]
+_SHARED_FILES = ["package.json", "package-lock.json", "data/"]
 
 
 def _strip_fences(text: str) -> str:
@@ -147,7 +147,7 @@ def load_cached_tasks(repo_path: Path) -> Optional[List[Task]]:
                     list(spec.get("impl_paths", [])), spec_path
                 ),
                 depends_on=spec.get("depends_on", []),
-                max_iterations=spec.get("max_iterations", 6),
+                max_iterations=spec.get("max_iterations", 4),
             )
         )
     return tasks

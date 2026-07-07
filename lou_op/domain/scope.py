@@ -24,6 +24,7 @@ class EmptyScopeError(Exception):
 # Ephemeral / non-source paths the guard should never touch.
 # These are either loop-internal state or build artifacts that
 # the model's tools legitimately produce as side effects.
+# scope.py - line ~35
 _EPHEMERAL_PREFIXES: tuple = (
     ".lou-op/",
     ".lou-op-jobs/",
