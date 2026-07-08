@@ -438,7 +438,6 @@ class JobManager:
                     consistency_judge=consistency_judge,
                     budget=self.settings.context_budget_tokens,
                     timeout=self.settings.inference_timeout_s,
-                    strict_scope=self.settings.strict_scope,
                     deadline=job_deadline,
                     tree=tree,
                 )

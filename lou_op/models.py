@@ -54,8 +54,6 @@ class Task(BaseModel):
     # Glob patterns (relative to repo root) the model must not change; the loop
     # snapshots matches at task start and restores them before every validation.
     protected_files: List[str] = Field(default_factory=list)
-    # If set, model changes outside these globs are reverted (".lou-op/" exempt).
-    allowed_paths: List[str] = Field(default_factory=list)
     # A task with no criteria, no lint, and no judge is unverifiable; loading
     # one fails unless this is set (see orchestrator.validate_tasks).
     allow_no_validators: bool = False

@@ -6,9 +6,7 @@ frameworks. Enforced by ``tests/test_import_boundaries.py``.
 """
 
 from .graph import TaskGraph
-from .scope import Scope
 
 __all__ = [
-    "Scope",
     "TaskGraph",
 ]

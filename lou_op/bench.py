@@ -45,7 +45,7 @@ def run_bench(
 
     Each run starts from a clean state (git reset between runs).
     Bench must measure the SAME configuration a real run uses — pass the
-    job's settings/runtime so strict_scope and sandboxed validators apply.
+    job's settings/runtime so sandboxed validators apply.
     """
     settings = settings or Settings()
     repo_path = Path(repo_path)
@@ -98,7 +98,6 @@ def run_bench(
                     task,
                     backend,
                     validators=validators,
-                    strict_scope=settings.strict_scope,
                 )
 
                 # Check if the run passed (last result)

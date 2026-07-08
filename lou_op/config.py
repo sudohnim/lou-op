@@ -121,9 +121,6 @@ class Settings:
     native_wall_timeout_s: int = 1800
     # "Bearer" (OpenRouter/vLLM/Modal) or "Api-Key" (Baseten).
     auth_scheme: str = "Bearer"
-    # strict scope: tasks without allowed_paths get scope inferred from their
-    # description instead of unlimited write access.
-    strict_scope: bool = False
     # execution runtime for model-influenced commands: "host" | "docker".
     runtime: str = "host"
     # tasks with satisfied deps run concurrently up to this bound (1 = serial).
@@ -172,7 +169,6 @@ class Settings:
             native_max_turns=_env_int("LOU_NATIVE_MAX_TURNS", 40),
             native_wall_timeout_s=_env_int("LOU_NATIVE_WALL_TIMEOUT", 1800),
             auth_scheme=_env("LOU_AUTH_SCHEME", "Bearer"),
-            strict_scope=_env_bool("LOU_STRICT_SCOPE", False),
             runtime=_env("LOU_RUNTIME", "host"),
             max_parallel=_env_int("LOU_MAX_PARALLEL", 1),
             max_job_tokens=_env_int("LOU_MAX_JOB_TOKENS", 0),

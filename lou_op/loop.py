@@ -6,7 +6,7 @@ import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 from . import AUTHOR
 from .backends.base import Backend
@@ -29,7 +29,6 @@ if TYPE_CHECKING:
     from .workspace import Workspace
 
 from .adapters.workspace_host import HostWorkspace
-from .domain.scope import EmptyScopeError, Scope
 from .ports.workspace import Workspace as TreeWorkspace
 
 
@@ -104,7 +103,6 @@ def run_task(
     consistency_judge: Optional[ConsistencyJudge] = None,
     budget: int = 100_000,
     timeout: int = 300,
-    strict_scope: bool = False,
     deadline: Optional[float] = None,
     tree: Optional[TreeWorkspace] = None,
 ) -> List[IterationResult]:
@@ -123,7 +121,6 @@ def run_task(
             consistency_judge=consistency_judge,
             budget=budget,
             timeout=timeout,
-            strict_scope=strict_scope,
             deadline=deadline,
             tree=tree,
         )
@@ -139,7 +136,6 @@ def _run_task(
     consistency_judge: Optional[ConsistencyJudge] = None,
     budget: int = 100_000,
     timeout: int = 300,
-    strict_scope: bool = False,
     deadline: Optional[float] = None,
     tree: Optional[TreeWorkspace] = None,
 ) -> List[IterationResult]:
@@ -155,33 +151,6 @@ def _run_task(
     work_path = workspace.path if workspace is not None else repo_path
     protected = _snapshot_protected(work_path, task.protected_files)
     log.debug("protected snapshot", files=len(protected))
-
-    # scope policy is a domain object: strict + nothing inferable fails
-    # CLOSED there (EmptyScopeError), never unlimited by accident
-    try:
-        scope_policy = Scope.from_task(
-            task.allowed_paths,
-            task.protected_files,
-            strict=strict_scope,
-            description=task.description,
-        )
-    except EmptyScopeError:
-        log.warning(
-            "strict scope failing closed: no allowed_paths and no files"
-            " named in the description",
-            phase="guard",
-        )
-        return [
-            IterationResult(
-                iteration=0,
-                passed=False,
-                done=False,
-                commit="",
-                validations=[],
-                wrote_files=False,
-                stop_reason="scope_empty",
-            )
-        ]
 
     # Anti-gaming pre-flight: a healthy spec is red before any work. If the
     # validators already pass, either the task is done (resume) or the spec is
@@ -233,10 +202,6 @@ def _run_task(
             ]
 
     stop_reason = "max_iterations"
-    # cumulative revert counts across iterations: a path reverted repeatedly
-    # means the scope is too narrow (the model keeps writing a file the guard
-    # keeps reverting) — surfaced loudly so scope bugs don't hide as churn.
-    revert_counts: Dict[str, int] = {}
     for iteration in range(1, task.max_iterations + 1):
         with bound(iteration=iteration):
             result = _run_iteration(
@@ -247,7 +212,6 @@ def _run_task(
                 work_path,
                 workspace,
                 checks,
-                scope_policy,
                 protected,
                 consistency_judge,
                 budget,
@@ -255,7 +219,6 @@ def _run_task(
                 last_validation,
                 last_wrote_files,
                 last_claimed_done,
-                revert_counts,
             )
         if isinstance(result, _Stop):
             stop_reason = result.reason
@@ -293,7 +256,6 @@ def _run_iteration(
     work_path: Path,
     workspace: Optional["Workspace"],
     checks: List[Validator],
-    scope_policy: Scope,
     protected: dict[str, str],
     consistency_judge: Optional[ConsistencyJudge],
     budget: int,
@@ -301,7 +263,6 @@ def _run_iteration(
     last_validation: List[ValidationResult],
     last_wrote_files: bool,
     last_claimed_done: bool,
-    revert_counts: Dict[str, int],
 ):
     """One iteration. Returns a ``_Stop`` to end the loop with a reason, else
     the tuple ``(result, last_validation, last_wrote_files, last_claimed_done)``."""
@@ -351,22 +312,9 @@ def _run_iteration(
     output = retry_with_backoff(lambda: backend.run_iteration(ctx))
     last_claimed_done = output.done
 
-    reverted = scope_policy.enforce(tree)
-    if reverted:
-        log.info("reverted out-of-scope changes", phase="guard", paths=reverted)
-        for path in reverted:
-            revert_counts[path] = revert_counts.get(path, 0) + 1
-            if revert_counts[path] == 2:
-                # the model keeps writing a file the scope keeps reverting —
-                # almost always an under-scoped task (e.g. the router/entry
-                # file that wires the feature isn't in impl_paths)
-                log.warning(
-                    "scope likely too narrow: repeatedly reverting a path the"
-                    " model keeps writing — add it to the task's allowed_paths"
-                    " (often the integration/wiring file)",
-                    phase="guard",
-                    path=path,
-                )
+    # The exam is frozen: restore any protected spec file the model touched.
+    # No file-scope fence — the model may write anything; the gate is what
+    # judges it, not a write-boundary policy.
     _restore_protected(tree, protected)
 
     last_wrote_files = bool(tree.changed_paths())

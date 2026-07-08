@@ -102,6 +102,30 @@ class TestToolLoop:
         assert output.done is False
         assert "list_dir" in output.summary
 
+    def test_no_write_nudge_after_exploring(self, repo: Path) -> None:
+        """A model that only explores (never writes) gets pushed to implement
+        once past the halfway turn — the antidote to explore-paralysis."""
+        nudges: List[str] = []
+        n = {"i": 0}
+
+        def chat(messages: List[Dict[str, Any]], tools: Any) -> Dict[str, Any]:
+            for m in messages:
+                if m.get("role") == "user" and "NOT written any files" in (
+                    m.get("content") or ""
+                ):
+                    nudges.append(m["content"])
+            n["i"] += 1
+            return {  # always explore, never write
+                "content": None,
+                "tool_calls": [_tool_call(str(n["i"]), "list_dir")],
+            }
+
+        backend = NativeAgentBackend(
+            "http://localhost", "k", "m", chat_fn=chat, max_turns=6
+        )
+        backend.run_iteration(_ctx(repo))
+        assert nudges, "expected a no-write nudge to be injected"
+
     def test_path_escape_reported_not_written(self, repo: Path) -> None:
         backend = _backend(
             [

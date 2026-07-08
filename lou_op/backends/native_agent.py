@@ -280,9 +280,38 @@ class NativeAgentBackend(Backend):
         transcript: List[str] = []
         last_tool_signature: str = ""
         repeat_count: int = 0
+        wrote_any: bool = False
+        nudged_no_write: bool = False
         deadline = time.monotonic() + self.wall_timeout_s
 
         for turn in range(1, self.max_turns + 1):
+            # Explore-paralysis guard: the model routinely burns every turn
+            # reading/grepping/git-spelunking and never writes, then hits the
+            # cap with nothing. Once past the halfway mark with zero writes,
+            # push it to implement instead of search.
+            threshold = max(4, self.max_turns // 2)
+            if turn >= threshold and not wrote_any and not nudged_no_write:
+                nudged_no_write = True
+                log.info(
+                    "no files written after exploring — nudging to implement",
+                    phase="native",
+                    turn=turn,
+                )
+                messages.append(
+                    {
+                        "role": "user",
+                        "content": (
+                            f"You have used {turn - 1} turns exploring and have"
+                            " NOT written any files. Stop searching and reading —"
+                            " you have enough context. Implement now from the"
+                            " spec: create or edit the files the task requires."
+                            " If a config file (e.g. playwright.config, a router,"
+                            " an entry point) is missing, CREATE it — do not keep"
+                            " hunting for an existing one. The gate cannot pass"
+                            " until you write code."
+                        ),
+                    }
+                )
             if time.monotonic() > deadline:
                 raise TimeoutError(
                     f"native agent wall timeout ({self.wall_timeout_s}s)"
@@ -368,6 +397,8 @@ class NativeAgentBackend(Backend):
                 log.info("tool", phase="native", tool=name, args=_preview_args(args))
                 audit.record("tool_call", {"name": name, **args})
                 result = execute_tool(tree, name, args)
+                if name in ("write_file", "edit_file"):
+                    wrote_any = True
                 # empty result (e.g. read of an empty file) has no lines
                 first_line = result.splitlines()[0] if result else ""
                 audit.record("tool_result", {"name": name, "result": first_line})

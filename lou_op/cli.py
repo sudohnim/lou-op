@@ -222,8 +222,6 @@ def _run(args: argparse.Namespace) -> int:
     settings = Settings.from_env()
     if args.jobs_dir:
         settings.jobs_dir = Path(args.jobs_dir)
-    if getattr(args, "strict_scope", False):
-        settings.strict_scope = True
     if getattr(args, "runtime", ""):
         settings.runtime = args.runtime
     if getattr(args, "max_parallel", 0):
@@ -431,12 +429,6 @@ def main(argv: list[str] | None = None) -> int:
     run.add_argument("--project-name", dest="project_name", default="")
     run.add_argument("--remote", default=None, help="git remote URL to push to")
     run.add_argument("--jobs-dir", dest="jobs_dir", default="")
-    run.add_argument(
-        "--strict-scope",
-        dest="strict_scope",
-        action="store_true",
-        help="tasks without allowed_paths get scope inferred from description",
-    )
     run.add_argument(
         "--runtime",
         default="",

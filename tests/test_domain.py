@@ -5,46 +5,8 @@ from __future__ import annotations
 
 import pytest
 
-from lou_op.domain import Scope, TaskGraph
+from lou_op.domain import TaskGraph
 from lou_op.domain.graph import Node, schedule
-from lou_op.domain.scope import EmptyScopeError
-from lou_op.ports.workspace import Changed, ExecResult
-
-
-class FakeTree:
-    """In-memory Workspace fake: files dict + scripted exec results."""
-
-    def __init__(self, files=None, exec_pass=True):
-        self.files = dict(files or {})
-        self.exec_pass = exec_pass
-        self.execs: list[str] = []
-        self.restored: list[str] = []
-        self._changes: list[Changed] = []
-
-    def set_changes(self, changes):
-        self._changes = changes
-
-    # port surface used by domain
-    def exec(self, command, *, timeout=300, deadline=None):
-        self.execs.append(command)
-        ok = (
-            self.exec_pass
-            if isinstance(self.exec_pass, bool)
-            else self.exec_pass(command)
-        )
-        return ExecResult(0 if ok else 1, "out", "")
-
-    def changed_paths(self):
-        return list(self._changes)
-
-    def restore_paths(self, paths):
-        self.restored.extend(paths)
-
-    def read(self, rel):
-        return self.files[rel]
-
-    def write(self, rel, content):
-        self.files[rel] = content
 
 
 class TestTaskGraph:
@@ -87,26 +49,3 @@ class TestScheduler:
     def test_serial_reproduces_order(self):
         g = TaskGraph([Node("a"), Node("b")])
         assert schedule(g, {}, [], max_parallel=1) == ["a"]
-
-
-class TestScope:
-    def test_fail_closed_when_nothing_inferable(self):
-        with pytest.raises(EmptyScopeError):
-            Scope.from_task([], [], strict=True, description="Make it better.")
-
-    def test_strict_infers_from_description(self):
-        s = Scope.from_task([], [], strict=True, description="Implement impl.py now.")
-        assert s.permits("impl.py") and not s.permits("sneaky.py")
-
-    def test_enforce_reverts_rename_both_sides(self):
-        tree = FakeTree()
-        tree.set_changes([Changed(path="b.txt", status="renamed", old_path="a.txt")])
-        s = Scope(allowed=["impl.py"])
-        reverted = s.enforce(tree)
-        assert set(reverted) == {"a.txt", "b.txt"}
-        assert set(tree.restored) == {"a.txt", "b.txt"}
-
-    def test_exempt_and_nonstrict(self):
-        s = Scope(allowed=["impl.py"])
-        assert s.permits(".lou-op/audit.jsonl")
-        assert Scope(allowed=[]).permits("anything.py")

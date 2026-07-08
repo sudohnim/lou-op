@@ -59,21 +59,3 @@ def test_preflight_not_counted_as_iteration(repo):
     stats = report.task_stats[0]
     assert stats.passes == 2
     assert stats.mean_iterations == 0
-
-
-def test_bench_honors_strict_scope(repo):
-    """strict_scope in settings must change bench results exactly as it
-    changes run results (fail-closed when nothing is inferable)."""
-    from lou_op.backends.mock import MockBackend
-    from lou_op.config import Settings
-
-    task = Task(
-        name="no-scope",
-        description="Make everything better.",  # nothing inferable
-        success_criteria=["test -f impl.py"],  # red until impl exists
-        max_iterations=2,
-    )
-    settings = Settings()
-    settings.strict_scope = True
-    report = run_bench(repo, [task], MockBackend(), runs=1, settings=settings)
-    assert report.task_stats[0].passes == 0  # failed closed, as a run would

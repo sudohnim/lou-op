@@ -28,16 +28,13 @@ class Runtime(ABC):
     """
 
     @abstractmethod
-    def setup(self, job_id: str, repo_path: Path) -> None:
-        ...
+    def setup(self, job_id: str, repo_path: Path) -> None: ...
 
     @abstractmethod
-    def shell(self, command: str, cwd: Path, *, timeout: int = 300) -> CmdResult:
-        ...
+    def shell(self, command: str, cwd: Path, *, timeout: int = 300) -> CmdResult: ...
 
     @abstractmethod
-    def teardown(self) -> None:
-        ...
+    def teardown(self) -> None: ...
 
     def sync_in(self, repo_path: Path) -> None:
         """Push the local repo state to the execution environment."""
