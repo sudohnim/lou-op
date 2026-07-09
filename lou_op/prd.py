@@ -78,14 +78,22 @@ Rules:
   (one task defines `parseX`, another imports `detectX`).
 - If the PRD describes a multi-process app (e.g. a frontend PLUS a backend /
   worker / API server), emit a dedicated task for the RUN + DEPLOY HARNESS —
-  the config and scripts that boot every process together locally (e.g.
-  wrangler.toml + a `.dev.vars.example`, a compose file, a `dev:all` script) —
-  AND an INTEGRATION smoke test whose gate boots the whole stack and drives one
-  real cross-process path end to end (e.g. hit the frontend's auth/login link
-  and assert the backend responds). Unit gates verify pieces in isolation; they
-  systematically miss "the assembled system does not run." Without this task a
-  project can pass every gate yet be un-runnable — the integration task is the
-  gate that fails until the product actually works as a whole.
+  the config and scripts that let a human boot every process together locally
+  (wrangler.toml + `.dev.vars.example`, a compose file, a `dev:all` script) —
+  AND an INTEGRATION task that verifies the cross-process CONTRACT.
+- CRITICAL: the integration gate must verify that contract IN-PROCESS, using
+  the framework's in-memory test harness — NOT by booting real servers, a
+  browser, and a proxy. Use `unstable_dev` (Cloudflare Workers), supertest or a
+  fetch against an in-process app (Node/Express), FastAPI/Flask `TestClient`,
+  Rails integration tests, etc. Call the handler in memory and assert the
+  contract (e.g. `POST /api/chat` with no auth cookie returns 401; the reply
+  shape matches what the frontend client parses). This catches the real bug
+  class — frontend and backend disagreeing on the request/response shape, or a
+  route missing — WITHOUT the multi-service orchestration (ports, readiness
+  URLs, build artifacts, headed browsers) that makes a gate slow, flaky, and
+  effectively un-passable for the implementer. Booting the true wired runtime
+  (does the proxy route, does wrangler serve) is a deploy concern the human
+  validates by running the harness — it is NOT the integration gate.
 
 Respond with ONLY a JSON object (no prose, no markdown fences). The two
 examples below show a pure-unit task and an E2E task — note the E2E gate is a

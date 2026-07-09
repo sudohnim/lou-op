@@ -19,6 +19,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..adapters.workspace_host import HostWorkspace
 from ..audit import AuditLog
+from ..exec import strip_ansi
 from ..logutil import get_logger
 from ..ports.provider import Provider
 from ..models import IterationContext, IterationOutput
@@ -31,7 +32,10 @@ log = get_logger()
 # Tool results are truncated so a chatty command can't blow the context.
 _MAX_TOOL_RESULT_CHARS = 20_000
 _MAX_READ_CHARS = 50_000
-_BASH_TIMEOUT_S = 120
+# 120s was tight for integration-style tasks (playwright booting a worker +
+# vite + headed browser). 240s absorbs `sleep N && curl` wait-for-server
+# patterns the model legitimately reaches for when wiring multi-service gates.
+_BASH_TIMEOUT_S = 240
 
 _SYSTEM_PROMPT = f"""\
 You are an autonomous coding agent working in a git repository.
@@ -151,7 +155,7 @@ def execute_tool(tree: Workspace, name: str, args: Dict[str, Any]) -> str:
             res = tree.exec(args["command"], timeout=_BASH_TIMEOUT_S)
             if res.killed:
                 return f"error: command timed out after {_BASH_TIMEOUT_S}s"
-            out = (res.stdout + res.stderr).strip()
+            out = strip_ansi(res.stdout + res.stderr).strip()
             return _truncate(f"exit {res.returncode}\n{out}")
 
         if name == "list_dir":
@@ -379,16 +383,18 @@ class NativeAgentBackend(Backend):
                             {
                                 "role": "user",
                                 "content": (
-                                    "You've run the same command 3 times. It's not working. "
-                                    "Try a completely different approach. If you're searching for "
-                                    "a binary, check if it's already installed via `which node` "
-                                    "or `command -v node`. If tests are failing, read the actual "
-                                    "error output carefully before retrying."
+                                    f"You've run the same command {repeat_count} times now. "
+                                    "It's not working. Try a completely different approach. If "
+                                    "you're searching for a binary, check if it's already "
+                                    "installed via `which node` or `command -v node`. If tests "
+                                    "are failing, read the actual error output carefully before "
+                                    "retrying. Do NOT repeat this exact command again."
                                 ),
                             }
                         )
-                        repeat_count = 0
-                        last_tool_signature = ""
+                        # keep last_tool_signature sticky so a 4th, 5th, ...
+                        # identical call escalates further instead of restarting
+                        # the 3-count timer from zero.
                         continue
                 else:
                     repeat_count = 0

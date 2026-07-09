@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,6 +70,61 @@ def _clean_build_artifacts(work_path: Path) -> None:
         if tracked.stdout.strip():
             continue  # git tracks files here → it's source, not an artifact
         shutil.rmtree(target, ignore_errors=True)
+
+
+# Dependency dirs that are (correctly) git-ignored but must be present for a
+# gate to execute — symlinked into the clean checkout so runners work.
+_DEP_DIRS = ("node_modules", ".venv", "venv", "vendor")
+
+# Ignored paths that are legitimately absent from a commit (deps, build output,
+# tooling) — not the cause of a broken clean checkout.
+_IGNORED_OK = _DEP_DIRS + ("dist", "build", "target", ".next", "out", ".git")
+
+
+def _ignored_source_files(work_path: Path) -> List[str]:
+    """Git-ignored paths that look like SOURCE (not deps/build) — the usual
+    reason a clean checkout fails: source the .gitignore silently drops."""
+    res = run_command(["git", "status", "--ignored", "--porcelain"], work_path)
+    out: List[str] = []
+    for line in res.stdout.splitlines():
+        if not line.startswith("!!"):
+            continue
+        path = line[3:].strip().rstrip("/")
+        head = path.split("/", 1)[0]
+        if head in _IGNORED_OK or path in _IGNORED_OK:
+            continue
+        out.append(path)
+    return out
+
+
+def _clean_checkout_validate(
+    work_path: Path, task: "Task", timeout: int
+) -> List[ValidationResult]:
+    """Run the gate against ONLY what git would commit.
+
+    Materialises the staged tree (tracked, non-ignored files) into a temp dir
+    via ``checkout-index`` and runs the task's validators there, dependency
+    dirs symlinked in. Catches a commit that is not self-contained — source
+    that .gitignore silently drops, or files left uncommitted — which passes
+    against the dirty working tree but fails from a clean checkout.
+    """
+    run_command(["git", "add", "-A"], work_path)
+    tmp = Path(tempfile.mkdtemp(prefix="lou-clean-"))
+    try:
+        run_command(
+            ["git", f"--work-tree={tmp}", "checkout-index", "-a", "-f"], work_path
+        )
+        for dep in _DEP_DIRS:
+            src = work_path / dep
+            if src.exists() and not (tmp / dep).exists():
+                try:
+                    os.symlink(src, tmp / dep)
+                except OSError:
+                    pass
+        # host-cwd validators (no tree shell_fn) execute at the clean tmp dir
+        return [check.run(tmp) for check in build_validators(task, timeout)]
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
 
 
 def _snapshot_protected(repo_path: Path, patterns: List[str]) -> dict[str, str]:
@@ -219,6 +276,7 @@ def _run_task(
                 last_validation,
                 last_wrote_files,
                 last_claimed_done,
+                timeout,
             )
         if isinstance(result, _Stop):
             stop_reason = result.reason
@@ -263,6 +321,7 @@ def _run_iteration(
     last_validation: List[ValidationResult],
     last_wrote_files: bool,
     last_claimed_done: bool,
+    timeout: int,
 ):
     """One iteration. Returns a ``_Stop`` to end the loop with a reason, else
     the tuple ``(result, last_validation, last_wrote_files, last_claimed_done)``."""
@@ -322,6 +381,42 @@ def _run_iteration(
     _clean_build_artifacts(work_path)
     last_validation = [check.run(work_path) for check in checks]
     passed = all(v.passed for v in last_validation)
+
+    # Reproducibility gate: a green working tree isn't enough — the COMMIT must
+    # pass too. Re-run the gate against only what git would commit, so source
+    # that .gitignore drops or the model left uncommitted fails here instead of
+    # shipping a branch that won't build from a clean checkout. Host only (the
+    # clean checkout runs on the host, not inside a docker/modal sandbox).
+    if passed and checks and isinstance(tree, HostWorkspace):
+        clean = _clean_checkout_validate(work_path, task, timeout)
+        if not all(v.passed for v in clean):
+            passed = False
+            # Point the model at the actual cause: files present in its working
+            # tree but git-ignored, so absent from the commit. Prepended so it
+            # survives output truncation and lands in "Last Validation Output".
+            ignored = _ignored_source_files(work_path)
+            note = ""
+            if ignored:
+                note = (
+                    "CLEAN-CHECKOUT FAILED: these paths exist in your working"
+                    " tree but are GIT-IGNORED, so the commit omits them and it"
+                    " won't build from a clean clone: "
+                    + ", ".join(ignored[:10])
+                    + ". Fix .gitignore (remove the offending rule) or move the"
+                    " files out of the ignored path, then rewrite them.\n\n"
+                )
+            for v in clean:
+                if not v.passed:
+                    v.output = note + v.output
+            last_validation = clean
+            log.error(
+                "passed on the working tree but FAILED a clean checkout — the"
+                " commit is not self-contained",
+                phase="validate",
+                ignored_paths=ignored,
+                output=clean[0].output[:800] if clean else "",
+            )
+
     done = passed
     log.info(
         "iteration complete",

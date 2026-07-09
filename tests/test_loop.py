@@ -67,6 +67,41 @@ def test_loop_iterates_until_pass(repo: Path):
     assert results[1].passed
 
 
+def test_clean_checkout_gate_catches_gitignored_source(repo: Path):
+    """Source that .gitignore silently drops passes on the dirty working tree
+    but must FAIL the clean-checkout gate — the committed branch wouldn't
+    build. This is the exact kuma-kare `lib/`-ignored-by-a-Python-gitignore
+    bug."""
+
+    class _IgnoredLibBackend(MockBackend):
+        def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+            from lou_op.protocol import write_files
+
+            write_files(
+                ctx.repo_path,
+                [
+                    FileWrite(".gitignore", "lib/\n"),
+                    FileWrite("app.py", "import lib.helper\n\nvalue = lib.helper.v\n"),
+                    FileWrite("lib/__init__.py", ""),
+                    FileWrite("lib/helper.py", "v = 1\n"),
+                ],
+            )
+            return IterationOutput(done=True, summary="wrote app", log="")
+
+    task = Task(
+        name="ignored-lib",
+        success_criteria=['python -c "import app"'],
+        max_iterations=1,
+    )
+    results = run_task(repo, task, _IgnoredLibBackend(), budget=10_000)
+    # dirty tree has lib/ so `import app` works, but lib/ is git-ignored → the
+    # clean checkout has no lib/ → import fails → the gate must not pass
+    assert not results[-1].passed
+    # the failure must name the git-ignored path so the model can self-fix
+    joined = "\n".join(v.output for v in results[-1].validations)
+    assert "GIT-IGNORED" in joined and "lib" in joined
+
+
 def test_clean_build_artifacts_removes_untracked_keeps_tracked(tmp_path: Path):
     """Backstop against stale-artifact false passes: an untracked build dir is
     wiped before a gate runs, but a committed ``build/`` source tree is left

@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import List
 
-from .exec import run_command, run_shell
+from .exec import strip_ansi, run_command, run_shell
 from .models import Task, ValidationResult, ValidationStatus
 
 
@@ -53,7 +53,10 @@ class CommandValidator(Validator):
 
     def run(self, repo_path: Path) -> ValidationResult:
         result = self.shell_fn(self.command, repo_path, timeout=self.timeout)
-        output = (result.stdout + result.stderr).strip()
+        # strip ANSI escapes so the model never sees raw \x1b[31m tokens
+        # (vitest/playwright color their output even when piped), and the
+        # gate-FAILED log line stays readable instead of escape-soup.
+        output = strip_ansi(result.stdout + result.stderr).strip()
         if result.timed_out:
             output = f"(timed out after {self.timeout}s)\n{output}"
         return ValidationResult(
@@ -85,7 +88,7 @@ class PythonLintValidator(Validator):
             result = run_command(cmd, repo_path, timeout=self.timeout)
             mark = "PASS" if result.passed else "FAIL"
             outputs.append(
-                f"[{mark}] {tool}\n{(result.stdout + result.stderr).strip()}"
+                f"[{mark}] {tool}\n{strip_ansi(result.stdout + result.stderr).strip()}"
             )
             passed = passed and result.passed
         return ValidationResult(self.name, passed, "\n".join(outputs))

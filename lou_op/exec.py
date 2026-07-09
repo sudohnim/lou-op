@@ -9,6 +9,7 @@ used to supervise long-running agent CLIs.
 from __future__ import annotations
 
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -19,6 +20,13 @@ from typing import Callable, List, Optional, Sequence, TypeVar
 
 T = TypeVar("T")
 
+# CSI sequences (colors, cursor moves, etc.) + OSC sequences (window title,
+# hyperlink, etc.) that some test runners (vitest, playwright) emit even when
+# stdout is piped. Leaking these into model context wastes tokens and confuses
+# the loop. Also forces NO_COLOR/CI in scrubbed_env so well-behaved tools drop
+# colors at the source.
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>].")
+
 
 def _to_str(value: object) -> str:
     if value is None:
@@ -26,6 +34,17 @@ def _to_str(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode(errors="replace")
     return str(value)
+
+
+def strip_ansi(text: str) -> str:
+    """Remove ANSI CSI/OSC/other escape sequences from text.
+
+    Handles 256-color and truecolor SGR (`\x1b[38;5;123m`, `\x1b[38;2;r;g;bm`),
+    cursor/edits, OSC hyperlinks (epoch.vimrs hết, iTerm), and a few legacy
+    single-shift sequences that some test runners leak when stdout is a pipe
+    but tty detection still engages.
+    """
+    return _ANSI_RE.sub("", text)
 
 
 @dataclass
@@ -66,15 +85,27 @@ _ENV_ALLOWED = {
 }
 _ENV_ALLOWED_PREFIXES = ("LC_",)
 
+# Well-behaved test runners (vitest, playwright, jest, mocha, pytest, cargo,
+# ripgrep) respect these and drop color codes at the source. Saves the
+# strip_ansi() regex pass from doing all the work, and keeps logs readable.
+_FORCE_NO_COLOR = {"NO_COLOR": "1", "CLICOLOR": "0", "CLICOLOR_FORCE": "0", "TERM": "dumb"}
+
 
 def scrubbed_env(passthrough: Sequence[str] = ()) -> dict:
-    """Strict allowlist of os.environ; ``passthrough`` adds names to it."""
+    """Strict allowlist of os.environ; ``passthrough`` adds names to it.
+
+    Adds NO_COLOR / CLICOLOR / TERM=dumb so model-influenced subprocesses
+    (validators, agent bash tool) never emit ANSI escapes that waste context
+    tokens or break log parsing.
+    """
     keep = set(passthrough)
-    return {
+    env = {
         key: value
         for key, value in os.environ.items()
         if key in keep or key in _ENV_ALLOWED or key.startswith(_ENV_ALLOWED_PREFIXES)
     }
+    env.update(_FORCE_NO_COLOR)
+    return env
 
 
 def run_command(cmd: Sequence[str], cwd: Path, *, timeout: int = 300) -> CmdResult:
