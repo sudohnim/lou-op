@@ -49,6 +49,12 @@ class Task(BaseModel):
     name: str
     description: str = ""
     success_criteria: List[str] = Field(default_factory=list)
+    # Structural gate that DRIVES the build phase (compile/typecheck/lint, e.g.
+    # "tsc --noEmit", "go build ./..."). Empty => no separate build phase and
+    # success_criteria drives directly (legacy behaviour). When set, the loop
+    # builds to the intent against this gate first, THEN locks with the behavior
+    # test (success_criteria) — so the model builds the product, not the exam.
+    build_check: List[str] = Field(default_factory=list)
     lint: bool = False  # run the built-in Python lint validator too
     judge: bool = False  # add LLM-as-judge quality gate after each iteration
     # Glob patterns (relative to repo root) the model must not change; the loop

@@ -157,6 +157,7 @@ def run_task(
     *,
     workspace: Optional["Workspace"] = None,
     validators: Optional[List[Validator]] = None,
+    build_checks: Optional[List[Validator]] = None,
     consistency_judge: Optional[ConsistencyJudge] = None,
     budget: int = 100_000,
     timeout: int = 300,
@@ -175,6 +176,7 @@ def run_task(
             backend,
             workspace=workspace,
             validators=validators,
+            build_checks=build_checks,
             consistency_judge=consistency_judge,
             budget=budget,
             timeout=timeout,
@@ -190,6 +192,7 @@ def _run_task(
     *,
     workspace: Optional["Workspace"] = None,
     validators: Optional[List[Validator]] = None,
+    build_checks: Optional[List[Validator]] = None,
     consistency_judge: Optional[ConsistencyJudge] = None,
     budget: int = 100_000,
     timeout: int = 300,
@@ -200,7 +203,10 @@ def _run_task(
     if tree is None:
         tree = HostWorkspace(repo_path)
     checks = validators if validators is not None else build_validators(task, timeout)
-    log.debug("validators built", count=len(checks))
+    # Structural gate that drives the build phase (compile/typecheck). Empty =>
+    # no separate build phase; the acceptance gate drives directly.
+    build_checks = build_checks or []
+    log.debug("validators built", count=len(checks), build_checks=len(build_checks))
     results: List[IterationResult] = []
     last_validation: List[ValidationResult] = []
     last_wrote_files: bool = True  # assume first iteration will be productive
@@ -215,29 +221,24 @@ def _run_task(
     if checks:
         _clean_build_artifacts(work_path)
         preflight = [check.run(work_path) for check in checks]
-        # A gate that can't even execute (missing runner, no tests collected)
-        # is a broken harness, not a coding task — abort now instead of
-        # burning the model against a gate that can never turn green.
+        # A gate that can't execute yet (missing runner, wrong command) is NOT
+        # fatal: the agent's job — especially the scaffold task — is to CREATE
+        # the environment (install deps, write config, use the right binary).
+        # Surface it as a hint and let the agent work; no-progress + max-turns
+        # bound any spelunking. Aborting here pre-empts a fix the agent could
+        # make (e.g. `python` missing but `python3` present) and is more brittle
+        # than a model running interactively.
         errored = [v for v in preflight if v.errored]
         if errored:
-            log.error(
-                "environment not ready — gate cannot execute; aborting task"
-                " (install deps / fix the test runner)",
+            log.warning(
+                "gate cannot execute yet — letting the agent set up the"
+                " environment (install deps / fix the command)",
                 phase="guard",
                 validators=", ".join(v.name for v in errored),
                 output=errored[0].output[-800:],
             )
-            return [
-                IterationResult(
-                    iteration=0,
-                    passed=False,
-                    done=False,
-                    commit="",
-                    validations=preflight,
-                    wrote_files=False,
-                    stop_reason="env_not_ready",
-                )
-            ]
+            # seed last_validation so the agent sees the error and can fix it
+            last_validation = preflight
         preflight_passed = all(v.passed for v in preflight)
         log.debug("preflight done", all_passed=preflight_passed)
         if preflight_passed:
@@ -269,6 +270,7 @@ def _run_task(
                 work_path,
                 workspace,
                 checks,
+                build_checks,
                 protected,
                 consistency_judge,
                 budget,
@@ -314,6 +316,7 @@ def _run_iteration(
     work_path: Path,
     workspace: Optional["Workspace"],
     checks: List[Validator],
+    build_checks: List[Validator],
     protected: dict[str, str],
     consistency_judge: Optional[ConsistencyJudge],
     budget: int,
@@ -379,8 +382,20 @@ def _run_iteration(
     last_wrote_files = bool(tree.changed_paths())
 
     _clean_build_artifacts(work_path)
-    last_validation = [check.run(work_path) for check in checks]
-    passed = all(v.passed for v in last_validation)
+    # BUILD-then-LOCK. The structural gate (compile/typecheck) drives the build:
+    # while it's red, the agent sees ONLY build errors and builds toward the
+    # task intent — the behavior test is not even run, so it can't become the
+    # thing the model games/stubs to. Once it builds, the behavior test
+    # (`checks`) gates and locks the feature. No build_checks => legacy: the
+    # behavior test drives directly.
+    structural = [c.run(work_path) for c in build_checks]
+    if build_checks and not all(v.passed for v in structural):
+        last_validation = structural
+        passed = False
+    else:
+        behavior = [check.run(work_path) for check in checks]
+        last_validation = structural + behavior
+        passed = all(v.passed for v in behavior)
 
     # Reproducibility gate: a green working tree isn't enough — the COMMIT must
     # pass too. Re-run the gate against only what git would commit, so source

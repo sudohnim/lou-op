@@ -13,6 +13,8 @@ as the escape hatch — this is an additional input, not a replacement.
 from __future__ import annotations
 
 import json
+import platform
+import shutil
 
 from pathlib import Path
 
@@ -45,7 +47,15 @@ Rules:
 - Each task implements ONE cohesive module (may span a few related files);
   keep it small (1-3 iterations).
 - The test file is the contract. Make it concrete and runnable.
-- success_criteria is the shell command that runs that test file.
+- success_criteria is the shell command that runs that test file (the BEHAVIOR
+  gate — what the feature must do).
+- build_check is a SEPARATE list of STRUCTURAL commands — compile / type-check /
+  lint only, no behavior assertions (e.g. ["tsc --noEmit"], ["go build ./..."],
+  ["cargo build"], ["python3 -m mypy src"]). The loop runs build_check FIRST and
+  makes the implementer build the feature from your description against it,
+  THEN locks it with success_criteria — so the model builds the product, not
+  the test. Always provide build_check for compiled/typed stacks; leave it []
+  only for a pure-script task with no compile/type step.
 - Order tasks so earlier ones don't depend on later ones.
 - Match the language, framework, and toolchain specified in the PRD. Do
   NOT default to Python/pytest if the PRD specifies a different stack.
@@ -107,6 +117,7 @@ implementer writes:
       "description": "Pure slugify helper.",
       "spec_path": "tests/slugify.test.ts",
       "spec_content": "import {{ describe, it, expect }} from 'vitest';\\nimport {{ slugify }} from '../src/slugify';\\n\\ndescribe('slugify', () => {{\\n  it('lowercases and dashes', () => {{\\n    expect(slugify('A B')).toBe('a-b');\\n  }});\\n}});",
+      "build_check": ["npx tsc --noEmit"],
       "success_criteria": ["npx vitest run tests/slugify.test.ts"]
     }},
     {{
@@ -114,15 +125,66 @@ implementer writes:
       "description": "Landing page with a sign-in button, served at root.",
       "spec_path": "tests/e2e/landing.spec.ts",
       "spec_content": "import {{ test, expect }} from '@playwright/test';\\n\\ntest('shows sign-in', async ({{ page }}) => {{\\n  await page.goto('/');\\n  await expect(page.getByTestId('sign-in')).toBeVisible();\\n}});",
+      "build_check": ["npx tsc --noEmit", "npm run build"],
       "success_criteria": ["npx playwright test tests/e2e/landing.spec.ts"]
     }}
   ]
 }}
 
+TARGET ENVIRONMENT — every success_criteria command MUST run here. Use only
+tools listed AVAILABLE; never use one listed as NOT available (e.g. use
+`python3`, not `python`; `npx <tool>` rather than a bare global binary):
+{environment}
+
 PRD:
 ---
 {prd}
 """
+
+
+# Commands the spec model commonly reaches for in a gate. The probe reports
+# which exist on THIS machine so it writes runnable gates (e.g. `python3`, not
+# `python`, on a mac) instead of guessing blind.
+_PROBE_TOOLS = (
+    "python3",
+    "python",
+    "pytest",
+    "node",
+    "npm",
+    "npx",
+    "pnpm",
+    "yarn",
+    "go",
+    "cargo",
+    "rustc",
+    "java",
+    "mvn",
+    "gradle",
+    "ruby",
+    "bundle",
+    "php",
+    "composer",
+    "dotnet",
+    "make",
+    "docker",
+    "wrangler",
+    "tsc",
+)
+
+
+def probe_environment() -> str:
+    """Ground-truth capability probe of the target machine, injected into the
+    decomposition prompt so gate commands reference tools that actually exist
+    here. Uses the same PATH the validators run under (scrubbed_env keeps it)."""
+    available = [t for t in _PROBE_TOOLS if shutil.which(t)]
+    missing = [t for t in ("python", "pytest", "node", "npm") if not shutil.which(t)]
+    lines = [f"OS: {platform.system()} ({platform.machine()})"]
+    lines.append("AVAILABLE commands: " + (", ".join(available) or "(none detected)"))
+    if missing:
+        lines.append(
+            "NOT available — do NOT put these in a gate: " + ", ".join(missing)
+        )
+    return "\n".join(lines)
 
 
 def _strip_fences(text: str) -> str:
@@ -152,6 +214,7 @@ def _task_from_spec(spec: dict) -> Task:
         name=spec["name"],
         description=spec.get("description", ""),
         success_criteria=criteria,
+        build_check=list(spec.get("build_check", [])),
         protected_files=[spec["spec_path"]],
         depends_on=spec.get("depends_on", []),
         max_iterations=spec.get("max_iterations", 6),
@@ -199,7 +262,11 @@ def save_task_cache(specs: List[dict], repo_path: Path) -> None:
 
 
 def decompose_prd(
-    prd_text: str, generate: GenerateFn, *, save_dir: Optional[Path] = None
+    prd_text: str,
+    generate: GenerateFn,
+    *,
+    save_dir: Optional[Path] = None,
+    environment: str = "",
 ) -> List[dict]:
     """Ask the model to turn a PRD into task dicts with embedded specs.
 
@@ -210,7 +277,9 @@ def decompose_prd(
     from ``generate`` (TruncatedResponseError) and is deliberately NOT retried:
     the same cap would just truncate again.
     """
-    prompt = _PRD_PROMPT.format(prd=prd_text)
+    prompt = _PRD_PROMPT.format(
+        prd=prd_text, environment=environment or "(probe unavailable)"
+    )
     last_raw = ""
     last_err: Optional[json.JSONDecodeError] = None
     for _ in range(2):
@@ -268,7 +337,9 @@ def build_tasks_from_prd(
         print("[prd] delete .lou-op/tasks.json to force re-decomposition")
         return cached
 
-    # Fresh decomposition
-    specs = decompose_prd(prd_text, generate, save_dir=repo_path)
+    # Fresh decomposition — probe the machine so gates use tools that exist
+    specs = decompose_prd(
+        prd_text, generate, save_dir=repo_path, environment=probe_environment()
+    )
     save_task_cache(specs, repo_path)
     return materialize_specs(specs, repo_path)

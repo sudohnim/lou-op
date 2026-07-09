@@ -25,7 +25,9 @@ T = TypeVar("T")
 # stdout is piped. Leaking these into model context wastes tokens and confuses
 # the loop. Also forces NO_COLOR/CI in scrubbed_env so well-behaved tools drop
 # colors at the source.
-_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>].")
+_ANSI_RE = re.compile(
+    r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[=>]."
+)
 
 
 def _to_str(value: object) -> str:
@@ -88,7 +90,12 @@ _ENV_ALLOWED_PREFIXES = ("LC_",)
 # Well-behaved test runners (vitest, playwright, jest, mocha, pytest, cargo,
 # ripgrep) respect these and drop color codes at the source. Saves the
 # strip_ansi() regex pass from doing all the work, and keeps logs readable.
-_FORCE_NO_COLOR = {"NO_COLOR": "1", "CLICOLOR": "0", "CLICOLOR_FORCE": "0", "TERM": "dumb"}
+_FORCE_NO_COLOR = {
+    "NO_COLOR": "1",
+    "CLICOLOR": "0",
+    "CLICOLOR_FORCE": "0",
+    "TERM": "dumb",
+}
 
 
 def scrubbed_env(passthrough: Sequence[str] = ()) -> dict:

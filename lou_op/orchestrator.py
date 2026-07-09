@@ -31,7 +31,7 @@ from .adapters.store_sqlite import SqliteStore
 from .adapters.workspace_docker import DockerWorkspace
 from .adapters.workspace_host import HostWorkspace
 from .ports.workspace import Workspace as TreeWorkspace
-from .validators import build_validators
+from .validators import build_command_validators, build_validators
 from .workspace import GitWorkspace, NullWorkspace, Workspace
 
 log = get_logger()
@@ -404,6 +404,9 @@ class JobManager:
             )
 
         state_lock = threading.Lock()
+        # behavior tests of tasks that have passed — every later task must keep
+        # them green (regression net). Guarded by state_lock.
+        passed_criteria: List[str] = []
         # job wall-clock ceiling (JobSpec.timeout_seconds, default 2h)
         job_deadline = time.monotonic() + max(60, spec.timeout_seconds)
 
@@ -423,10 +426,17 @@ class JobManager:
                     return False  # over the ceiling: fail fast, don't start
                 with state_lock:
                     state.current_task = task.name
+                    regression = list(passed_criteria)  # prior tasks' behavior tests
+                shell = _tree_shell(tree)
+                timeout_s = self.settings.inference_timeout_s
+                # acceptance = this task's behavior test + every prior task's
+                # (regression net: a later task can't silently break an earlier)
                 validators = build_validators(
-                    task,
-                    self.settings.inference_timeout_s,
-                    shell_fn=_tree_shell(tree),
+                    task, timeout_s, shell_fn=shell
+                ) + build_command_validators(regression, timeout_s, shell_fn=shell)
+                # structural gate that DRIVES the build phase (compile/typecheck)
+                build_checks = build_command_validators(
+                    task.build_check, timeout_s, shell_fn=shell
                 )
                 consistency_judge = _make_consistency_judge(task, self.settings)
                 results = run_task(
@@ -435,13 +445,17 @@ class JobManager:
                     backend,
                     workspace=workspace,
                     validators=validators,
+                    build_checks=build_checks,
                     consistency_judge=consistency_judge,
                     budget=self.settings.context_budget_tokens,
-                    timeout=self.settings.inference_timeout_s,
+                    timeout=timeout_s,
                     deadline=job_deadline,
                     tree=tree,
                 )
                 passed = bool(results) and results[-1].done
+                if passed:
+                    with state_lock:
+                        passed_criteria.extend(task.success_criteria)
                 for r in results:
                     self.store.append(
                         state.job_id,

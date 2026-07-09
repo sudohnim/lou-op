@@ -53,6 +53,16 @@ def test_materialize_writes_and_freezes_specs(tmp_path: Path) -> None:
     assert task.protected_files == ["tests/test_slug.py"]
 
 
+def test_probe_environment_reports_os_and_available_tools() -> None:
+    """The probe gives the spec model ground truth about the machine so it
+    writes gate commands that actually run (e.g. python3 vs python)."""
+    from lou_op.prd import probe_environment
+
+    env = probe_environment()
+    assert "OS:" in env
+    assert "AVAILABLE commands:" in env
+
+
 def test_success_criteria_required(tmp_path: Path) -> None:
     """No silent Node/vitest default: a spec without a gate is rejected so the
     spec model must state, per stack, how the task is verified."""

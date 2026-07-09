@@ -67,6 +67,60 @@ def test_loop_iterates_until_pass(repo: Path):
     assert results[1].passed
 
 
+def test_unrunnable_gate_lets_agent_run_not_abort(repo: Path):
+    """A gate whose command doesn't exist (e.g. `python` on a mac) must NOT
+    abort at preflight — the agent gets to run and fix the environment."""
+    ran = {"n": 0}
+
+    class _Rec(MockBackend):
+        def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+            from lou_op.protocol import write_files
+
+            ran["n"] += 1
+            write_files(ctx.repo_path, [FileWrite("impl.py", f"x = {ran['n']}\n")])
+            return IterationOutput(done=False, summary="wrote impl", log="")
+
+    task = Task(
+        name="bad-gate",
+        success_criteria=["nonexistent-cmd-xyz-123 --run"],
+        max_iterations=2,
+    )
+    results = run_task(repo, task, _Rec(), budget=10_000)
+    assert ran["n"] >= 1  # agent ran despite the un-runnable gate
+    assert results[-1].stop_reason != "env_not_ready"
+
+
+def test_build_gate_drives_before_behavior_lock(repo: Path):
+    """Build-then-lock: while the structural gate is red the agent sees ONLY
+    build errors and the behavior test is NOT run (can't be gamed); once it
+    builds, the behavior test locks it."""
+    from lou_op.validators import build_command_validators
+
+    step = {"n": 0}
+
+    class _B(MockBackend):
+        def run_iteration(self, ctx: IterationContext) -> IterationOutput:
+            from lou_op.protocol import write_files
+
+            step["n"] += 1
+            # iter1: feature present but it doesn't "build" yet; iter2: it builds
+            f = "feature.ok" if step["n"] == 1 else "build.ok"
+            write_files(ctx.repo_path, [FileWrite(f, "x\n")])
+            return IterationOutput(done=False, summary="wrote", log="")
+
+    task = Task(
+        name="staged", success_criteria=["test -f feature.ok"], max_iterations=3
+    )
+    build_checks = build_command_validators(["test -f build.ok"])
+    results = run_task(repo, task, _B(), build_checks=build_checks, budget=10_000)
+
+    # iter1: build gate red -> ONLY the structural check ran, behavior staged out
+    assert [v.name for v in results[0].validations] == ["test -f build.ok"]
+    assert not results[0].passed
+    # iter2: builds -> behavior test runs and passes -> locked
+    assert results[-1].passed
+
+
 def test_clean_checkout_gate_catches_gitignored_source(repo: Path):
     """Source that .gitignore silently drops passes on the dirty working tree
     but must FAIL the clean-checkout gate — the committed branch wouldn't

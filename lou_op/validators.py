@@ -94,10 +94,17 @@ class PythonLintValidator(Validator):
         return ValidationResult(self.name, passed, "\n".join(outputs))
 
 
+def build_command_validators(
+    commands: List[str], timeout: int = 300, shell_fn=None
+) -> List[Validator]:
+    """One CommandValidator per shell command (structural gates, regression)."""
+    return [CommandValidator(cmd, timeout, shell_fn) for cmd in commands]
+
+
 def build_validators(task: Task, timeout: int = 300, shell_fn=None) -> List[Validator]:
-    validators: List[Validator] = [
-        CommandValidator(cmd, timeout, shell_fn) for cmd in task.success_criteria
-    ]
+    validators: List[Validator] = build_command_validators(
+        task.success_criteria, timeout, shell_fn
+    )
     if task.lint:
         validators.append(PythonLintValidator(timeout))
     return validators
